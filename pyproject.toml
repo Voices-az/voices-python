@@ -53,6 +53,8 @@ dev = [
 [project.urls]
 Homepage = "https://voices.az"
 Documentation = "https://voices.az/docs"
+Repository = "https://github.com/Voices-az/voices-python"
+Issues = "https://github.com/Voices-az/voices-python/issues"
 
 [tool.hatch.version]
 path = "src/voices_az/_version.py"

@@ -11,7 +11,7 @@ speech-to-text and video dubbing, with Azerbaijani first.
 
 Documentation of the HTTP API: <https://voices.az/docs>
 
-Also in: [Azərbaycan dili](docs/README.az.md) · [Русский](docs/README.ru.md)
+Also in: [Azərbaycan dili](https://github.com/Voices-az/voices-python/blob/main/docs/README.az.md) · [Русский](https://github.com/Voices-az/voices-python/blob/main/docs/README.ru.md)
 
 ## Install
 
