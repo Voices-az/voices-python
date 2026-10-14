@@ -1,0 +1,3553 @@
+{
+    "openapi": "3.0.3",
+    "info": {
+        "title": "Voices.az API",
+        "version": "1.0.0",
+        "description": "Text-to-speech, speech-to-text and video dubbing over HTTP.\n\nEvery account gets an API key at registration. The key identifies the account, and\neverything it creates is billed to that account's balance — so a call that would cost\nmore than the remaining balance is refused before any work is queued.\n\n**Base URL** — `https://voices.az/api`\n\n### Authentication\n\nSend the key in the `X-API-KEY` header on every request:\n\n```\nX-API-KEY: vz_live_0123456789abcdef0123456789abcdef01234567\n```\n\nFor compatibility with the published PHP client the key is also accepted as a bare\n`Authorization` header (no `Bearer` prefix). New integrations should use `X-API-KEY`.\n\nThe key must never travel in a query string: it would end up in server logs, in proxy\nlogs and in the `Referer` of every asset a response links to. Requests carrying a key\nin the URL are refused with `401`.\n\nKeys are managed in the panel at **app.voices.az → Profile → API key**: the current\nkey is shown there, and it can be rotated or revoked. Rotation is immediate — the\nprevious key stops working the moment the new one is issued — and the new secret is\ndisplayed once.\n\n### What a key may call\n\nA key authenticates the *integration* surface and nothing else. Everything documented\nin this reference is inside that surface:\n\n* the service endpoints — `/services/text-to-speech/*`, `/services/speech-to-text/*`,\n  `/services/dubbing/*`, `/services/cloning/*`, `/services/website-reader/*`;\n* the catalogue — `/languages`, `/get-languages`, `/get-voices`, `/get-voice/*`,\n  `/services`, `/service/{slug}`, `/favorite`;\n* read-only account figures — `/customer/balance`, `/customer/transactions`.\n\nEverything else on `app.voices.az` is a panel-session operation and is refused to a\nkey with `403` and `error.type = api_key_scope`: the profile and its updates, the\navatar, panel state, logout, balance top-ups, promo codes, and the API key's own\nlifecycle (show / rotate / revoke). A key that leaks can therefore cost its owner\nbalance — it can never take over the account, read the owner's contact details, or\nreplace itself.\n\nSign in to the panel for any of those. There is no way to widen a key's scope.\n\n### Idempotency\n\nEvery call that queues work debits the balance, so a retry after a network timeout\nmust not become a second charge. Send an `Idempotency-Key` header on those calls:\n\n```\nIdempotency-Key: 8e6c3f0a-2a7d-4a5e-9f2b-7b1c0d4e5a66\n```\n\n* **Same key, same body** — the stored response is replayed unchanged, with the same\n  `request_id` and the header `Idempotent-Replayed: true`. Nothing is queued and\n  nothing is charged a second time.\n* **Same key, different body** — `422`, `error.type = idempotency_key_reused`. The key\n  already stands for a different operation; use a new one.\n* **Same key while the first call is still running** — `409`,\n  `error.type = idempotency_in_progress`. Wait a moment and retry with the same key to\n  get the replay.\n* **Server errors are not stored.** If a call fails with `5xx`, retrying it with the\n  same key runs the operation for real.\n\nRecords live for **24 hours**. The key may be any string of up to 64 characters from\n`A-Z a-z 0-9 . _ : -`; a uuid per operation is the intended use. Anything longer or\noutside that set is refused with `422`, `error.type = idempotency_key_invalid`.\n\nThe header is honoured on the calls that charge:\n\n| Endpoint |\n| --- |\n| `POST /services/text-to-speech/synthesize` |\n| `POST /services/text-to-speech/generate/{projectId}` |\n| `POST /services/speech-to-text/init` |\n| `POST /services/speech-to-text/recognize` |\n| `POST /services/speech-to-text/generate/{projectId}` |\n| `POST /services/dubbing/init` |\n| `POST /services/dubbing/preview/{projectId}` |\n| `POST /services/dubbing/generate/{projectId}` |\n| `POST /services/dubbing/render/{projectId}` |\n| `POST /services/dubbing/regenerate-chunk/{projectId}/{chunkId}` |\n\nEverywhere else the header is ignored, so a client may send it on every request\nwithout keeping track of which endpoints honour it. Without the header, behaviour is\nunchanged.\n\n### Pricing\n\nThe API bills at exactly the same per-minute tariff as the panel — there is no\nsurcharge for API use and no separate API plan. The current rate per service is\n`GET /services` and `GET /service/{slug}`; what a specific run will cost is returned\nby the call that starts it (`price`), and the charge is taken from the same balance\nthe panel spends. Duration is billed per minute of processed audio or video.\n\n### Retention\n\nFiles do not live in storage forever. The **project row** does: an expired project\nkeeps its id, its title and its place in `get-projects`, and\n`GET /services/{service}/{projectId}` still answers `200`. What it loses is its files.\n\n| What | Window |\n| --- | --- |\n| A paid project of any service, and everything it produced | **6 months** (180 days) after the last activity on it |\n| A dubbing project that was only previewed and never paid for | **30 days** |\n| Cloned voices | never swept |\n\n\"Last activity\" is the latest of the project's creation, its last change and its last\norder.\n\nOnce the sweep has taken a project's files it is marked, on every endpoint that returns\na project:\n\n* `is_expired: true`\n* `expired_at` — when the files went, ISO-8601\n\nand every url under `body` is `null`, so a client that ignores the flag gets nulls\nrather than links to objects that are gone.\n\nAny call that would ACT on those files answers `410` with `error.type = gone`:\n\n| Refused with `410` |\n| --- |\n| `POST /services/text-to-speech/generate/{projectId}` |\n| `POST /services/text-to-speech/export/{projectId}` |\n| `POST /services/speech-to-text/generate/{projectId}` |\n| `POST /services/speech-to-text/export/{projectId}` |\n| `POST /services/dubbing/generate/{projectId}` |\n| `POST /services/dubbing/preview/{projectId}` |\n| `POST /services/dubbing/regenerate-chunk/{projectId}/{chunkId}` |\n| `POST /services/dubbing/render/{projectId}` |\n| `POST /services/dubbing/export/{projectId}` |\n\nReading, listing, renaming, favouriting and deleting an expired project keep working,\nand creating a NEW project from the same text or a fresh upload is never affected.\nRetrying a `410` never helps — the files cannot be restored. Download what matters\nbefore the window closes.\n\n### Text tags\n\nText sent to text-to-speech may carry a few inline tags. They are written in square\nbrackets, inside the `text` field itself:\n\n| Tag | Effect |\n| --- | --- |\n| `[PAUSE=1.5]` | A silence of that many seconds at this point. |\n| `[LAUGH]` | A short laugh. |\n| `[SIGH]` | A sigh. |\n| `[UHM]` | An \"uhm\" hesitation, as in live speech. |\n| `[SHH]` | A quiet \"shh\". |\n\n`[PAUSE=n]` takes its length in seconds with a decimal point — `[PAUSE=0.5]`,\n`[PAUSE=1.5]`. Anything shorter than half a second is not treated as a pause.\n\nTag names are case-insensitive: `[laugh]` and `[LAUGH]` are the same tag. Anything\nelse between square brackets is not a tag — unknown tags are removed from the text\nbefore synthesis, so they are never read out.\n\nThe four sound tags are a hint rather than an instruction: they mark where the sound\nbelongs, and the AI may mispronounce them.\n\nTags are part of the text, so they count towards the character limit of the `text`\nfield. They do not change the price: text-to-speech is billed by the duration of the\naudio that comes back, and the silence of a `[PAUSE=n]` is part of that duration.\n\n### Language\n\n`Accept-Language: az | en | ru | tr` selects the language of human-readable messages\n(`message`, `error.message`, status titles). It does not affect ids or enum values.\n\n### Response envelope\n\nEvery response uses the same envelope.\n\nSuccess:\n\n```json\n{ \"success\": true, \"message\": \"Operation successful\", \"data\": { } }\n```\n\nFailure:\n\n```json\n{\n  \"success\": false,\n  \"error\": { \"message\": \"…\", \"code\": 404, \"type\": \"not_found\", \"data\": null }\n}\n```\n\n`error.code` is the HTTP status; `error.type` is a stable machine-readable slug —\nbranch on that rather than on the message, which is localised.\n\n### Rate limits\n\n60 requests per minute and 5000 per day, counted per API key. Over budget the API\nanswers `429` with `Retry-After` and `X-RateLimit-*` headers. Back off for\n`Retry-After` seconds; do not retry immediately.\n\n### Asynchronous work\n\nSynthesis, recognition and dubbing are queued. The call that starts one returns a\n`request_id`; poll the matching `get-response` endpoint (or, for speech-to-text, the\nproject itself) until `status` becomes `COMPLETED` or `FAILED`. Poll no more often\nthan once every 2 seconds.\n",
+        "contact": {
+            "name": "Voices.az",
+            "url": "https://voices.az"
+        },
+        "license": {
+            "name": "Proprietary"
+        }
+    },
+    "servers": [
+        {
+            "url": "https://voices.az/api",
+            "description": "Production"
+        }
+    ],
+    "security": [
+        {
+            "ApiKeyAuth": []
+        }
+    ],
+    "tags": [
+        {
+            "name": "Text to speech",
+            "description": "Turn text into an audio file."
+        },
+        {
+            "name": "Speech to text",
+            "description": "Turn an audio or video source into text and subtitles."
+        },
+        {
+            "name": "Dubbing",
+            "description": "Replace the speech in a video with speech in another language."
+        },
+        {
+            "name": "Catalogue",
+            "description": "Voices, languages, services and prices."
+        },
+        {
+            "name": "Account",
+            "description": "Balance and transactions."
+        }
+    ],
+    "paths": {
+        "/languages": {
+            "get": {
+                "tags": [
+                    "Catalogue"
+                ],
+                "summary": "List supported languages",
+                "description": "The `id` values returned here are what `language_id` expects everywhere else.\nThis endpoint needs no key.\n",
+                "security": [],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "allOf": [
+                                        {
+                                            "$ref": "#/components/schemas/Envelope"
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "data": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "languages": {
+                                                            "type": "array",
+                                                            "items": {
+                                                                "$ref": "#/components/schemas/Language"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "languages": [
+                                            {
+                                                "id": 6,
+                                                "code": "az",
+                                                "title": "Azerbaijani"
+                                            },
+                                            {
+                                                "id": 1,
+                                                "code": "en",
+                                                "title": "English"
+                                            },
+                                            {
+                                                "id": 2,
+                                                "code": "ru",
+                                                "title": "Russian"
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/get-voices/{page}": {
+            "get": {
+                "tags": [
+                    "Catalogue"
+                ],
+                "summary": "List voices",
+                "description": "Public voices plus any voice the account owns. Paginated, 20 per page.\n",
+                "parameters": [
+                    {
+                        "name": "page",
+                        "in": "path",
+                        "required": false,
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        }
+                    },
+                    {
+                        "name": "language_id",
+                        "in": "query",
+                        "description": "Only voices that support this language.",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "gender",
+                        "in": "query",
+                        "description": "`1` female, `2` male.",
+                        "schema": {
+                            "type": "integer",
+                            "enum": [
+                                1,
+                                2
+                            ]
+                        }
+                    },
+                    {
+                        "name": "title",
+                        "in": "query",
+                        "description": "Substring of the voice name.",
+                        "schema": {
+                            "type": "string"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "voices": [
+                                            {
+                                                "id": 41,
+                                                "full_name": "Aysel",
+                                                "gender": {
+                                                    "id": 1,
+                                                    "title": "Woman"
+                                                },
+                                                "age": 29,
+                                                "is_public": true,
+                                                "is_rent": false,
+                                                "price": null,
+                                                "created_at": "2025-02-11 10:04:21",
+                                                "image": "https://voices.az/storage/voices/images/aysel.png",
+                                                "source": "https://voices.az/storage/voices/sources/aysel.mp3",
+                                                "languages": [
+                                                    {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    }
+                                                ],
+                                                "favorite": false
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/TooManyRequests"
+                    }
+                }
+            }
+        },
+        "/services": {
+            "get": {
+                "tags": [
+                    "Catalogue"
+                ],
+                "summary": "List services and their prices",
+                "description": "One entry per service (`text-to-speech`, `speech-to-text`, `dubbing`, …) with the\ncurrent tariff. `price.amount` is per minute of produced audio or video, in\n`price.currency`.\n\n`GET /service/{slug}` returns the same entry for one service, and adds what only\nthat service has: its `limits` and, for dubbing, `prices` - the rates charged\nBESIDE the tariff. Dubbing has one, `auto_emotion_per_min`: the per-minute\nsurcharge for picking the emotion of every line automatically, billed on the same\nminutes as the dub itself.\n\n`auto_emotion_per_min` is nullable: `null` means the operator has switched the\nautomatic emotion off site-wide, so the feature is not on offer - clients hide the\nswitch, and `auto_emotion` is forced to `false` wherever it is accepted.\n",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "services": [
+                                            {
+                                                "id": 1,
+                                                "slug": "text-to-speech",
+                                                "title": "Text to speech",
+                                                "description": "Convert written text into natural speech.",
+                                                "instruction": "Paste your text, pick a voice, generate.",
+                                                "icon": "https://voices.az/storage/services/tts.svg",
+                                                "color": "#2F6BFF",
+                                                "created_at": "2024-04-05 15:03:21",
+                                                "price": {
+                                                    "amount": "0.30",
+                                                    "currency": "AZN"
+                                                }
+                                            },
+                                            {
+                                                "id": 5,
+                                                "slug": "dubbing",
+                                                "title": "Dubbing",
+                                                "description": "Dub a video into another language.",
+                                                "instruction": "Upload a video or paste a link, pick the languages.",
+                                                "icon": "https://voices.az/storage/services/dub.svg",
+                                                "color": "#7A3BFF",
+                                                "created_at": "2026-08-19 12:00:00",
+                                                "price": {
+                                                    "amount": "0.50",
+                                                    "currency": "AZN"
+                                                },
+                                                "prices": {
+                                                    "auto_emotion_per_min": {
+                                                        "amount": "0.05",
+                                                        "currency": "AZN"
+                                                    }
+                                                }
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/customer/balance": {
+            "get": {
+                "tags": [
+                    "Account"
+                ],
+                "summary": "Read the account balance",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "balance": {
+                                            "amount": "12.40",
+                                            "currency": "AZN"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/customer/transactions": {
+            "get": {
+                "tags": [
+                    "Account"
+                ],
+                "summary": "List balance transactions",
+                "description": "Paginated, newest first.",
+                "parameters": [
+                    {
+                        "name": "page",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "data": [
+                                            {
+                                                "id": 9182,
+                                                "amount": "-0.60",
+                                                "currency": "AZN",
+                                                "balance_snapshot": "11.80",
+                                                "description": "Charge for text to speech",
+                                                "operation_type": "Withdrawal",
+                                                "balance_type": "Deposit",
+                                                "status": "Completed",
+                                                "created_at": "2026-09-10 18:22:07"
+                                            }
+                                        ],
+                                        "links": {
+                                            "first": "…",
+                                            "last": "…",
+                                            "prev": null,
+                                            "next": "…"
+                                        },
+                                        "meta": {
+                                            "current_page": 1,
+                                            "from": 1,
+                                            "last_page": 4,
+                                            "per_page": 20,
+                                            "to": 20,
+                                            "total": 71
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/synthesize": {
+            "post": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Synthesize a single piece of text",
+                "description": "The one-call entry point: creates a project, adds the text and queues it.\nReturns a `request_id` to poll.\n\nCharging happens on download (`export`), not here.\n",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SynthesizeRequest"
+                            },
+                            "example": {
+                                "text": "Salam, bu bir sınaq mətnidir.",
+                                "language_id": 6,
+                                "voice_id": 41,
+                                "speed": 1
+                            }
+                        },
+                        "application/x-www-form-urlencoded": {
+                            "schema": {
+                                "$ref": "#/components/schemas/SynthesizeRequest"
+                            }
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "3a13a5c3-93d0-447c-a269-54079150f793",
+                                        "project": 5821
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/TooManyRequests"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/get-response/{requestId}": {
+            "get": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Poll a synthesis run",
+                "description": "Poll until `status` is `COMPLETED` or `FAILED`. While it is `IN_PROGRESS` the\nresponse carries `percentage` (0–100).\n\nA `request_id` that does not belong to the account is answered exactly like an\nunknown one — a neutral `IN_PROGRESS` at 0 %.\n",
+                "parameters": [
+                    {
+                        "name": "requestId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "examples": {
+                                    "inProgress": {
+                                        "summary": "Still running",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "status": "IN_PROGRESS",
+                                                "percentage": 45
+                                            }
+                                        }
+                                    },
+                                    "completed": {
+                                        "summary": "Finished",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "status": "COMPLETED",
+                                                "preview_url": "https://storage.voices.az/storage/tmp/3a13a5c3.mp3",
+                                                "duration": 7.44,
+                                                "blocks": [
+                                                    {
+                                                        "block_id": "0f2c1a5e-6b2a-4e6a-9b6e-2b4d8a1c9f77",
+                                                        "preview_url": "https://storage.voices.az/storage/tmp/0f2c1a5e.mp3",
+                                                        "start": 0,
+                                                        "end": 7.44,
+                                                        "duration": 7.44
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    },
+                                    "failed": {
+                                        "summary": "Failed",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "status": "FAILED"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/export/{projectId}": {
+            "post": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Charge for and download the audio",
+                "description": "Charges the account for the project the first time it is called and returns the\naudio file URL. Calling it again on an already paid project does not charge twice.\n\nThe delivered file is MP3. A `format` field is accepted for backwards\ncompatibility and ignored.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "format": {
+                                        "type": "string",
+                                        "example": "mp3"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "title": "Bu test mətndir",
+                                        "file": "https://storage.voices.az/storage/tmp/3a13a5c3.mp3"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "422": {
+                        "description": "Not enough balance, or nothing to export.",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": false,
+                                    "error": {
+                                        "message": "Your balance is not sufficient for this operation.",
+                                        "code": 422,
+                                        "type": "validation_failed",
+                                        "data": null
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/get-projects": {
+            "get": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "List text-to-speech projects",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Page"
+                    },
+                    {
+                        "name": "title",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "description": "Project status id — see `ProjectStatus`.",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "language_id",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "projects": {
+                                            "data": [
+                                                {
+                                                    "id": 5821,
+                                                    "title": "Bu test mətndir",
+                                                    "is_favorite": false,
+                                                    "is_expired": false,
+                                                    "expired_at": null,
+                                                    "is_paid": true,
+                                                    "language": {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    },
+                                                    "status": {
+                                                        "id": 4,
+                                                        "title": "Ordered"
+                                                    },
+                                                    "duration": 7,
+                                                    "price": {
+                                                        "amount": "0.04",
+                                                        "currency": "AZN"
+                                                    }
+                                                },
+                                                {
+                                                    "id": 5133,
+                                                    "title": "Köhnə mətn",
+                                                    "is_favorite": false,
+                                                    "is_expired": true,
+                                                    "expired_at": "2026-03-18T04:00:11+04:00",
+                                                    "is_paid": true,
+                                                    "language": {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    },
+                                                    "status": {
+                                                        "id": 4,
+                                                        "title": "Ordered"
+                                                    },
+                                                    "duration": 12,
+                                                    "price": {
+                                                        "amount": "0.07",
+                                                        "currency": "AZN"
+                                                    }
+                                                }
+                                            ],
+                                            "meta": {
+                                                "current_page": 1,
+                                                "last_page": 3,
+                                                "per_page": 20,
+                                                "total": 47
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/{projectId}": {
+            "get": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Read one text-to-speech project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "project": {
+                                            "id": 5821,
+                                            "title": "Bu test mətndir",
+                                            "is_favorite": false,
+                                            "is_expired": false,
+                                            "expired_at": null,
+                                            "is_paid": true,
+                                            "language": {
+                                                "id": 6,
+                                                "code": "az",
+                                                "title": "Azerbaijani"
+                                            },
+                                            "status": {
+                                                "id": 3,
+                                                "title": "Completed"
+                                            },
+                                            "duration": 7,
+                                            "price": {
+                                                "amount": "0.04",
+                                                "currency": "AZN"
+                                            },
+                                            "body": {
+                                                "percentage": 100,
+                                                "preview_url": "https://storage.voices.az/storage/tmp/3a13a5c3.mp3",
+                                                "blocks": [
+                                                    {
+                                                        "id": "0f2c1a5e-6b2a-4e6a-9b6e-2b4d8a1c9f77",
+                                                        "text": "Salam, bu bir sınaq mətnidir.",
+                                                        "sort_order": 1,
+                                                        "speed": 1,
+                                                        "preview_url": "https://storage.voices.az/storage/tmp/0f2c1a5e.mp3",
+                                                        "start": 0,
+                                                        "end": 7.44,
+                                                        "duration": 7.44,
+                                                        "voice": {
+                                                            "id": 41,
+                                                            "full_name": "Aysel",
+                                                            "is_rent": false
+                                                        }
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                        "request_id": null
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Delete a text-to-speech project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/add-block": {
+            "post": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Add a text block to a project",
+                "description": "Use this to build a multi-block project. Omit `project_id` to start a new one; the\nresponse carries the id to use for the following blocks.\n",
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "project_id": {
+                                        "type": "integer",
+                                        "nullable": true
+                                    },
+                                    "text": {
+                                        "type": "string",
+                                        "maxLength": 7000,
+                                        "nullable": true,
+                                        "description": "May contain the inline tags described under **Text tags** —\n`[PAUSE=1.5]`, `[LAUGH]`, `[SIGH]`, `[UHM]`, `[SHH]`. They count\ntowards `maxLength`; unknown tags are removed before synthesis.\n"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "id": "6c2f5d0a-9a11-4c7f-95e3-0b2a7a1b23c4",
+                                        "project_id": 5822,
+                                        "text": "Type your text here",
+                                        "sort_order": 2,
+                                        "speed": 1,
+                                        "language": {
+                                            "id": 6,
+                                            "code": "az",
+                                            "title": "Azerbaijani"
+                                        },
+                                        "voice": {
+                                            "id": 41,
+                                            "full_name": "Aysel"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/{projectId}/{blockId}": {
+            "put": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Update a block's text and speed",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/BlockId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "text",
+                                    "speed"
+                                ],
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "maxLength": 7000,
+                                        "description": "May contain the inline tags described under **Text tags** —\n`[PAUSE=1.5]`, `[LAUGH]`, `[SIGH]`, `[UHM]`, `[SHH]`. They count\ntowards `maxLength`; unknown tags are removed before synthesis.\n"
+                                    },
+                                    "speed": {
+                                        "type": "number",
+                                        "enum": [
+                                            1,
+                                            1.5,
+                                            2,
+                                            2.5,
+                                            3
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Delete a block",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/BlockId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/generate/{projectId}": {
+            "post": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Queue a multi-block project",
+                "description": "Returns the `request_id` to poll on `get-response`.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "3a13a5c3-93d0-447c-a269-54079150f793"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/text-to-speech/update-title/{projectId}": {
+            "put": {
+                "tags": [
+                    "Text to speech"
+                ],
+                "summary": "Rename a project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "title"
+                                ],
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "minLength": 3,
+                                        "maxLength": 255
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/recognize": {
+            "post": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Recognize an audio file or a YouTube video",
+                "description": "Creates the project, charges the account and queues the run in one call. Send\neither `voice` (an uploaded file, `multipart/form-data`) or `youtube_url` — exactly\none of the two.\n\nPoll `GET /services/speech-to-text/{projectId}` and read `body.percentage` until\nthe project's `status` reaches `Completed` (3) or `Rejected` (5).\n",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "multipart/form-data": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "language_id"
+                                ],
+                                "properties": {
+                                    "voice": {
+                                        "type": "string",
+                                        "format": "binary",
+                                        "description": "Audio or video file. Accepted formats and the size ceiling come from `GET /service/speech-to-text`."
+                                    },
+                                    "youtube_url": {
+                                        "type": "string",
+                                        "format": "uri",
+                                        "description": "A YouTube watch URL. Mutually exclusive with `voice`."
+                                    },
+                                    "language_id": {
+                                        "type": "integer",
+                                        "description": "Language spoken in the source, from `GET /languages`."
+                                    },
+                                    "diarize": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 10,
+                                        "default": 1,
+                                        "description": "Number of speakers to separate. `1` disables separation."
+                                    },
+                                    "demucs": {
+                                        "type": "boolean",
+                                        "default": false,
+                                        "description": "Strip music and background noise first. Improves the result on noisy sources and makes the run slower."
+                                    },
+                                    "convert_numbers": {
+                                        "type": "boolean",
+                                        "default": false,
+                                        "description": "Write numbers as digits instead of words."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "project_id": 6103,
+                                        "request_id": "9c4b1e2a-77aa-4b0e-8d5c-1e1b8c2a44f1",
+                                        "duration": 184,
+                                        "price": {
+                                            "amount": "0.92",
+                                            "currency": "AZN"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "description": "Validation failed, or the balance does not cover the run.",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": false,
+                                    "error": {
+                                        "message": "Your balance is not sufficient for this operation.",
+                                        "code": 422,
+                                        "type": "validation_failed",
+                                        "data": null
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "429": {
+                        "$ref": "#/components/responses/TooManyRequests"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/init": {
+            "post": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Upload a source without starting recognition",
+                "description": "Two-step alternative to `recognize`: upload first, read back the detected duration\nand the quote, then start the run with `generate`.\n",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "multipart/form-data": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "voice": {
+                                        "type": "string",
+                                        "format": "binary"
+                                    },
+                                    "youtube_url": {
+                                        "type": "string",
+                                        "format": "uri"
+                                    },
+                                    "project_id": {
+                                        "type": "integer",
+                                        "description": "Replace the source of an existing draft."
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "project_id": 6104,
+                                        "duration": 184,
+                                        "preview_url": "https://storage.voices.az/storage/stt/6104/source.mp3",
+                                        "price": {
+                                            "amount": "0.92",
+                                            "currency": "AZN"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/generate/{projectId}": {
+            "post": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Start recognition on an uploaded source",
+                "description": "Answers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "language_id"
+                                ],
+                                "properties": {
+                                    "language_id": {
+                                        "type": "integer"
+                                    },
+                                    "diarize": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 10,
+                                        "default": 1
+                                    },
+                                    "demucs": {
+                                        "type": "boolean",
+                                        "default": false
+                                    },
+                                    "convert_numbers": {
+                                        "type": "boolean",
+                                        "default": false
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "9c4b1e2a-77aa-4b0e-8d5c-1e1b8c2a44f1"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/{projectId}": {
+            "get": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Read one speech-to-text project",
+                "description": "This is also the polling endpoint: while the run is going `status.id` is\n`2` (In progress) and `body.percentage` climbs to 100.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "project": {
+                                            "id": 6103,
+                                            "title": "Interview",
+                                            "is_favorite": false,
+                                            "is_expired": false,
+                                            "expired_at": null,
+                                            "is_paid": true,
+                                            "language": {
+                                                "id": 6,
+                                                "code": "az",
+                                                "title": "Azerbaijani"
+                                            },
+                                            "status": {
+                                                "id": 3,
+                                                "title": "Completed"
+                                            },
+                                            "duration": 184,
+                                            "price": {
+                                                "amount": "0.92",
+                                                "currency": "AZN"
+                                            },
+                                            "body": {
+                                                "percentage": 100,
+                                                "preview_url": "https://storage.voices.az/storage/stt/6103/source.mp3",
+                                                "diarize": 2,
+                                                "demucs": false,
+                                                "convert_numbers": false,
+                                                "blocks": [
+                                                    {
+                                                        "id": 0,
+                                                        "gender": {
+                                                            "id": 2,
+                                                            "title": "Man"
+                                                        },
+                                                        "text": "Salam, bugün hava çox gözəldir.",
+                                                        "original_text": "Salam, bugün hava çox gözəldir.",
+                                                        "start": 0.32,
+                                                        "end": 3.11,
+                                                        "duration": 2.79
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                        "words_count": 412
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Delete a speech-to-text project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/{projectId}/{blockId}": {
+            "put": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Correct a recognized block",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/BlockId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "text"
+                                ],
+                                "properties": {
+                                    "text": {
+                                        "type": "string",
+                                        "maxLength": 20000
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/get-formats": {
+            "get": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "List export formats",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "formats": {
+                                            "vtt": "VTT",
+                                            "txt": "TXT",
+                                            "srt": "SRT",
+                                            "sbv": "SBV",
+                                            "dfxp": "DFXP",
+                                            "csv": "CSV"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/export/{projectId}": {
+            "post": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Export the transcript",
+                "description": "Renders the transcript in the requested format and returns a URL to it. Unknown\nformats are refused.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "format": {
+                                        "type": "string",
+                                        "enum": [
+                                            "txt",
+                                            "srt",
+                                            "vtt",
+                                            "sbv",
+                                            "dfxp",
+                                            "csv"
+                                        ],
+                                        "default": "txt"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "title": "Interview",
+                                        "file": "https://storage.voices.az/storage/stt/aZ8k2Q1pR7vT4wYx/export/9fK2mQ7xR1vT4wYz.srt"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/get-projects": {
+            "get": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "List speech-to-text projects",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Page"
+                    },
+                    {
+                        "name": "title",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "language_id",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/ProjectList"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/speech-to-text/update-title/{projectId}": {
+            "put": {
+                "tags": [
+                    "Speech to text"
+                ],
+                "summary": "Rename a project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "title"
+                                ],
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "minLength": 3,
+                                        "maxLength": 255
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/init": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Create a dubbing project from a file or a YouTube URL",
+                "description": "Creates a draft and starts preparing the source. Nothing is charged here.\n\nSend either `file` or `youtube_url`. The accepted formats and the size ceiling are\nin `GET /services/dubbing/get-formats`.\n",
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "multipart/form-data": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "background_mode"
+                                ],
+                                "properties": {
+                                    "file": {
+                                        "type": "string",
+                                        "format": "binary"
+                                    },
+                                    "youtube_url": {
+                                        "type": "string",
+                                        "format": "uri"
+                                    },
+                                    "source_language_id": {
+                                        "type": "integer",
+                                        "description": "Language spoken in the source. Detected automatically when omitted."
+                                    },
+                                    "language_id": {
+                                        "type": "integer",
+                                        "description": "Language to dub into. Required by the time `generate` is called."
+                                    },
+                                    "background_mode": {
+                                        "type": "string",
+                                        "enum": [
+                                            "duck",
+                                            "demucs"
+                                        ],
+                                        "description": "How the original soundtrack is handled under the new speech.\n`duck` lowers it while a line plays; `demucs` separates music and\neffects from speech and keeps them at full level.\n"
+                                    },
+                                    "num_speakers": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 10
+                                    },
+                                    "overlap_pan": {
+                                        "type": "boolean",
+                                        "default": true,
+                                        "description": "Pan overlapping speakers apart in the stereo field."
+                                    },
+                                    "auto_emotion": {
+                                        "type": "boolean",
+                                        "default": false,
+                                        "description": "Pick the emotion of every line automatically and voice it with the\nmatching style of the speaker's voice. Carries a per-minute surcharge\non top of the dubbing tariff - `prices.auto_emotion_per_min` in the\nservice payload - charged once, with the first `generate`. Can also be\nturned on later, through the settings endpoint.\n\nStored as `false` whatever is sent while the operator has the feature\nswitched off (`prices.auto_emotion_per_min` is then `null`).\n"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Created",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "project_id": 7420,
+                                        "price": {
+                                            "amount": "2.10",
+                                            "currency": "AZN"
+                                        },
+                                        "project": {
+                                            "id": 7420,
+                                            "title": "promo.mp4",
+                                            "is_favorite": false,
+                                            "is_expired": false,
+                                            "expired_at": null,
+                                            "is_paid": false,
+                                            "language": {
+                                                "id": 6,
+                                                "code": "az",
+                                                "title": "Azerbaijani"
+                                            },
+                                            "status": {
+                                                "id": 1,
+                                                "title": "Draft"
+                                            },
+                                            "duration": 92
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/get-formats": {
+            "get": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "List accepted source formats and background modes",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "formats": [
+                                            "mp4",
+                                            "mov",
+                                            "mkv",
+                                            "webm",
+                                            "m4v",
+                                            "mp3",
+                                            "wav"
+                                        ],
+                                        "background_modes": {
+                                            "duck": "Duck",
+                                            "demucs": "Separate"
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/get-voices": {
+            "get": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "List voices available for dubbing",
+                "parameters": [
+                    {
+                        "name": "language_id",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "voices": [
+                                            {
+                                                "id": 41,
+                                                "full_name": "Aysel",
+                                                "gender": {
+                                                    "id": 1,
+                                                    "title": "Woman"
+                                                },
+                                                "languages": [
+                                                    {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    }
+                                                ],
+                                                "favorite": false
+                                            }
+                                        ]
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/{projectId}/settings": {
+            "put": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Change project settings",
+                "description": "`background_mode` and `overlap_pan` are applied at mix time, so changing them never\ninvalidates work already done. `auto_emotion` changes how the lines are voiced, so\nthe next `render` re-records the ones it affects.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "background_mode": {
+                                        "type": "string",
+                                        "enum": [
+                                            "duck",
+                                            "demucs"
+                                        ]
+                                    },
+                                    "overlap_pan": {
+                                        "type": "boolean"
+                                    },
+                                    "auto_emotion": {
+                                        "type": "boolean",
+                                        "description": "Pick the emotion of every line automatically (see `init`). Changing it\ncharges nothing by itself and queues nothing: the lines it affects are\nre-recorded by the next `render`, which is also where the surcharge is\ntaken if the project has not paid it yet.\n"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/preview/{projectId}": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Produce a short preview",
+                "description": "Runs the first seconds of the video through the whole pipeline so the result can be\njudged before paying for the full dub. A number of previews per project are free;\nbeyond that each one is charged at the rate shown in the panel. Only allowed while\nthe project is a draft.\n\nReturns a `request_id` to poll on `get-response`. Answers `410` once the\nproject's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "language_id": {
+                                        "type": "integer"
+                                    },
+                                    "source_language_id": {
+                                        "type": "integer"
+                                    },
+                                    "num_speakers": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 10
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "2b8e6f11-4c33-4d2a-9a6f-7c1e5d9b0a22"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/generate/{projectId}": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Dub the whole video",
+                "description": "Charges the account for the full dub and queues it. Poll `get-response` until\n`status` is `COMPLETED`.\n\n`voice_map` assigns a voice to each detected speaker. Leave it out to let every\nspeaker keep a default voice of matching gender.\n\nThis is the call that pays for the dub: it sets the project's `is_paid` to `true`,\nand `POST /services/dubbing/export/{projectId}` is free from then on.\n\nThe amount is the per-minute dubbing tariff x the billable minutes, plus the\nautomatic-emotion surcharge when `body.auto_emotion` is on and has not been paid\nfor yet (`prices.auto_emotion_per_min` in the service payload x the same minutes).\nIt is a single order line and a single debit.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": false,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "language_id": {
+                                        "type": "integer"
+                                    },
+                                    "source_language_id": {
+                                        "type": "integer"
+                                    },
+                                    "num_speakers": {
+                                        "type": "integer",
+                                        "minimum": 1,
+                                        "maximum": 10
+                                    },
+                                    "auto_emotion": {
+                                        "type": "boolean",
+                                        "description": "Pick the emotion of every line automatically. When it is on at this\ncall, its per-minute surcharge is part of the amount charged here -\none order line, one debit - and is never charged again.\n"
+                                    },
+                                    "voice_map": {
+                                        "type": "object",
+                                        "description": "Speaker key to voice. Keys come from `body.speakers` of the project.",
+                                        "additionalProperties": {
+                                            "type": "object",
+                                            "properties": {
+                                                "voice_id": {
+                                                    "type": "integer"
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            },
+                            "example": {
+                                "language_id": 6,
+                                "voice_map": {
+                                    "SPEAKER_00": {
+                                        "voice_id": 41
+                                    },
+                                    "SPEAKER_01": {
+                                        "voice_id": 58
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "2b8e6f11-4c33-4d2a-9a6f-7c1e5d9b0a22"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/get-response/{requestId}": {
+            "get": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Poll a dubbing run",
+                "description": "Takes the `request_id` of any dubbing run — a preview, a full dub, a render, a\nsingle re-recorded line, or the mp4 assembly behind a `202` from `export` — and\nreports its stage and percentage.\n\n`video_url` is `null` for every run since 2026-09-15: a render produces the\nsoundtrack, and the downloadable mp4 is built by `export`. An id that does not\nbelong to the account is answered exactly like an unknown one — a neutral\n`IN_PROGRESS` at 0 %.\n",
+                "parameters": [
+                    {
+                        "name": "requestId",
+                        "in": "path",
+                        "required": true,
+                        "schema": {
+                            "type": "string",
+                            "format": "uuid"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "examples": {
+                                    "inProgress": {
+                                        "summary": "Still running",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "status": "IN_PROGRESS",
+                                                "stage": "translating",
+                                                "percentage": 38,
+                                                "video_url": null,
+                                                "audio_url": null
+                                            }
+                                        }
+                                    },
+                                    "completed": {
+                                        "summary": "Finished",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "status": "COMPLETED",
+                                                "stage": "done",
+                                                "percentage": 100,
+                                                "video_url": null,
+                                                "audio_url": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/dubbed.mp3",
+                                                "duration_ms": 92400,
+                                                "source_lang": "en"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/{projectId}": {
+            "get": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Read one dubbing project",
+                "description": "`body.chunks` holds the per-line timeline: source text, translation, timing and the\nvoice-over for each line. `body.speakers` holds the detected speakers and the keys\n`voice_map` expects.\n\nThis is also where an export is watched: `body.export_status` and\n`body.export_request_id` report the mp4 assembly started by\n`POST /services/dubbing/export/{projectId}`.\n\n**Media urls.** `audio_url` — and `video_url` where a project still has one — carry\na `?v=…` cache-buster that changes with every render. Use the url exactly as it is\ngiven: the object behind it is overwritten in place, and a url with the stamp\nstripped can serve the previous render for hours.\n\n`video_url` is `null` for every project rendered since 2026-09-15: a render now\nproduces the soundtrack only, and the picture is the source the project was created\nfrom (`source_video_url` for a YouTube source, otherwise the uploaded file). Play\n`audio_url` over the source, and use `export` for a single muxed file. Older\nprojects keep whatever `video_url` they had.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "allOf": [
+                                        {
+                                            "$ref": "#/components/schemas/Envelope"
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "data": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "project": {
+                                                            "allOf": [
+                                                                {
+                                                                    "$ref": "#/components/schemas/Project"
+                                                                },
+                                                                {
+                                                                    "type": "object",
+                                                                    "properties": {
+                                                                        "body": {
+                                                                            "$ref": "#/components/schemas/DubbingBody"
+                                                                        }
+                                                                    }
+                                                                }
+                                                            ]
+                                                        },
+                                                        "request_id": {
+                                                            "type": "string",
+                                                            "format": "uuid",
+                                                            "nullable": true,
+                                                            "description": "The most recent run of this project, or `null`."
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                "examples": {
+                                    "completed": {
+                                        "summary": "A finished dub",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "project": {
+                                                    "id": 7420,
+                                                    "title": "promo.mp4",
+                                                    "is_favorite": false,
+                                                    "is_expired": false,
+                                                    "expired_at": null,
+                                                    "is_paid": true,
+                                                    "language": {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    },
+                                                    "status": {
+                                                        "id": 4,
+                                                        "title": "Ordered"
+                                                    },
+                                                    "duration": 92,
+                                                    "price": {
+                                                        "amount": "2.10",
+                                                        "currency": "AZN"
+                                                    },
+                                                    "body": {
+                                                        "source_path": "dub/aZ8k2Q1pR7vT4wYx/source.mp4",
+                                                        "youtube_url": null,
+                                                        "source_video_url": null,
+                                                        "video_url": null,
+                                                        "audio_url": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/dubbed.mp3?v=1757923200",
+                                                        "duration_ms": 92400,
+                                                        "source_lang": "en",
+                                                        "target_lang": "az",
+                                                        "background_mode": "duck",
+                                                        "num_speakers": 2,
+                                                        "overlap_pan": true,
+                                                        "percentage": 100,
+                                                        "stage": "done",
+                                                        "preview_audio_url": null,
+                                                        "estimate": null,
+                                                        "render_count": 1,
+                                                        "preview_count": 1,
+                                                        "export_status": null,
+                                                        "export_request_id": null,
+                                                        "speakers": [
+                                                            {
+                                                                "key": "SPEAKER_00",
+                                                                "gender": "male"
+                                                            },
+                                                            {
+                                                                "key": "SPEAKER_01",
+                                                                "gender": "female"
+                                                            }
+                                                        ],
+                                                        "chunks": [
+                                                            {
+                                                                "id": "1c9b2a70-45d1-4f2e-a2c3-9d0e6b7f1a55",
+                                                                "speaker": "SPEAKER_00",
+                                                                "start_ms": 1200,
+                                                                "end_ms": 4300,
+                                                                "text": "Welcome to our studio.",
+                                                                "trans": "Studiyamıza xoş gəlmisiniz."
+                                                            }
+                                                        ]
+                                                    }
+                                                },
+                                                "request_id": "2b8e6f11-4c33-4d2a-9a6f-7c1e5d9b0a22"
+                                            }
+                                        }
+                                    },
+                                    "exporting": {
+                                        "summary": "An mp4 is being assembled",
+                                        "description": "What the project looks like between the `202` of `export` and the `200`\nof the next call. `export_status` clears when the file is there.\n",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "project": {
+                                                    "id": 7420,
+                                                    "title": "promo.mp4",
+                                                    "is_favorite": false,
+                                                    "is_expired": false,
+                                                    "expired_at": null,
+                                                    "is_paid": true,
+                                                    "language": {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    },
+                                                    "status": {
+                                                        "id": 4,
+                                                        "title": "Ordered"
+                                                    },
+                                                    "duration": 92,
+                                                    "price": {
+                                                        "amount": "2.10",
+                                                        "currency": "AZN"
+                                                    },
+                                                    "body": {
+                                                        "video_url": null,
+                                                        "audio_url": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/dubbed.mp3?v=1757923200",
+                                                        "stage": "done",
+                                                        "percentage": 100,
+                                                        "export_status": "pending",
+                                                        "export_request_id": "5d1f7c3e-8a20-4b6d-9f11-2c7a4e0b3d99"
+                                                    }
+                                                },
+                                                "request_id": "5d1f7c3e-8a20-4b6d-9f11-2c7a4e0b3d99"
+                                            }
+                                        }
+                                    },
+                                    "expired": {
+                                        "summary": "Retention has taken the files",
+                                        "description": "The project is still readable and still listed; its urls are `null` and\ngenerate / preview / regenerate-chunk / render / export answer `410`.\n",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "project": {
+                                                    "id": 6188,
+                                                    "title": "teaser.mp4",
+                                                    "is_favorite": false,
+                                                    "is_expired": true,
+                                                    "expired_at": "2026-03-18T04:00:11+04:00",
+                                                    "is_paid": true,
+                                                    "language": {
+                                                        "id": 6,
+                                                        "code": "az",
+                                                        "title": "Azerbaijani"
+                                                    },
+                                                    "status": {
+                                                        "id": 4,
+                                                        "title": "Ordered"
+                                                    },
+                                                    "duration": 41,
+                                                    "price": {
+                                                        "amount": "0.95",
+                                                        "currency": "AZN"
+                                                    },
+                                                    "body": {
+                                                        "source_path": null,
+                                                        "youtube_url": null,
+                                                        "source_video_url": null,
+                                                        "video_url": null,
+                                                        "audio_url": null,
+                                                        "preview_audio_url": null,
+                                                        "export_status": null,
+                                                        "export_request_id": null,
+                                                        "stage": "done",
+                                                        "percentage": 100,
+                                                        "chunks": []
+                                                    }
+                                                },
+                                                "request_id": null
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Delete a dubbing project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/{projectId}/chunk": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Add a spoken line",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "speaker",
+                                    "start_ms",
+                                    "trans"
+                                ],
+                                "properties": {
+                                    "speaker": {
+                                        "type": "string",
+                                        "maxLength": 64
+                                    },
+                                    "start_ms": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                    },
+                                    "target_duration_ms": {
+                                        "type": "integer",
+                                        "minimum": 500,
+                                        "maximum": 60000
+                                    },
+                                    "trans": {
+                                        "type": "string",
+                                        "maxLength": 5000
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/{projectId}/chunk/{chunkId}": {
+            "put": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Edit a line",
+                "description": "Changing `trans`, `speed` or the voice marks the line for re-recording; the next\n`render` picks it up.\n\nPicking a `voice` here is a manual choice and wins over the automatic emotion: it\nclears the line's `vo.auto_style`, and the next take is recorded with the voice\nsent here. Sending `voice: null` gives that choice back — the line returns to its\nspeaker's voice and to the automatic emotion.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ChunkId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "trans": {
+                                        "type": "string",
+                                        "maxLength": 5000,
+                                        "nullable": true
+                                    },
+                                    "speaker": {
+                                        "type": "string",
+                                        "maxLength": 64
+                                    },
+                                    "start_ms": {
+                                        "type": "integer",
+                                        "minimum": 0
+                                    },
+                                    "target_duration_ms": {
+                                        "type": "integer",
+                                        "minimum": 1
+                                    },
+                                    "volume_db": {
+                                        "type": "number",
+                                        "minimum": -60,
+                                        "maximum": 20
+                                    },
+                                    "muted": {
+                                        "type": "boolean"
+                                    },
+                                    "speed": {
+                                        "type": "number",
+                                        "minimum": 0.5,
+                                        "maximum": 2
+                                    },
+                                    "voice": {
+                                        "type": "object",
+                                        "nullable": true,
+                                        "description": "The voice this one line is recorded with. `null` removes it: the line\ngoes back to the voice of its speaker, and to the automatic emotion if\nthe project uses it.\n",
+                                        "properties": {
+                                            "voice_id": {
+                                                "type": "integer"
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            },
+            "delete": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Delete a line",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ChunkId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/regenerate-chunk/{projectId}/{chunkId}": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Re-record one line",
+                "description": "Answers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ChunkId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "2b8e6f11-4c33-4d2a-9a6f-7c1e5d9b0a22"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/render/{projectId}": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Re-mix the video after edits",
+                "description": "A number of renders per project are free; beyond that each one is charged at the\nrate shown in the panel. Returns a `request_id` to poll.\n\n`data.price` is the WHOLE amount this render costs, or `null` when it costs\nnothing. Besides the re-render fee it may carry one more thing, once: the\nautomatic-emotion surcharge, when `body.auto_emotion` was switched on after the dub\nhad already been paid for. It is taken by the first render that follows, after\nwhich `body.auto_emotion_paid_at` is set and the switch is free to turn off and on\nagain.\n\nA render produces the soundtrack, not a video file: `body.audio_url` is rewritten\n(with a fresh `?v=` stamp) and `body.video_url` stays `null`. The downloadable mp4\nis built on demand by `export`.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/IdempotencyKey"
+                    },
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "Queued",
+                        "content": {
+                            "application/json": {
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "request_id": "2b8e6f11-4c33-4d2a-9a6f-7c1e5d9b0a22"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "409": {
+                        "$ref": "#/components/responses/IdempotencyInProgress"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/export/{projectId}": {
+            "post": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Download the finished dub",
+                "description": "Returns the final video and audio, without the preview watermark. The dub is paid\nfor on `generate` (`is_paid: true` on the project), so this call normally charges\nnothing; a project dubbed before that rule is charged here, once.\n\n**The mp4 is built on demand, so this endpoint has two successes.** A render leaves\nthe soundtrack behind, not a muxed file, so the first export of a project usually\nhas to assemble one:\n\n* `200` — the file is ready. `data` carries `title`, `file` (mp4) and `audio`\n  (mp3).\n* `202` — `data` is `{ \"pending\": true, \"request_id\": \"…\" }`. The assembly was\n  queued. Calling again while it runs returns the SAME `202` and the same\n  `request_id`; it never queues a second one.\n\n**How to poll.** Watch the project itself:\n`GET /services/dubbing/{projectId}` → `body.export_status` is `pending` while the\nmp4 is being assembled, `failed` if that attempt died, and `null` once it is done;\n`body.export_request_id` is the id of that attempt. When `export_status` clears,\ncall `export` again and it answers `200`. `GET /services/dubbing/get-response/{requestId}`\ntakes the same `request_id` and reports the stage and percentage while it runs.\nA `failed` status is not fatal — the next `export` starts a fresh attempt. Poll no\nmore often than once every 2 seconds.\n\n**The urls carry a `?v=…` cache-buster and must be used exactly as given.** The\nobjects behind them are overwritten in place by the next render, so a url with the\nstamp stripped can serve the previous render for hours. The mp4 is a cache with a\nshort life of its own: an export that is not fetched promptly may have to be\nassembled again — which is simply another `202`, not an error.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The file is ready.",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "allOf": [
+                                        {
+                                            "$ref": "#/components/schemas/Envelope"
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "data": {
+                                                    "$ref": "#/components/schemas/DubbingExport"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "title": "promo.mp4",
+                                        "file": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/clean/9fK2mQ7xR1vT4wYz/dubbed.mp4?v=1757923200",
+                                        "audio": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/clean/9fK2mQ7xR1vT4wYz/dubbed.mp3?v=1757923200"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "202": {
+                        "description": "The mp4 is being assembled. Poll the project's `body.export_status` and call\nagain when it clears. Nothing is charged for a `202`.\n",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "allOf": [
+                                        {
+                                            "$ref": "#/components/schemas/Envelope"
+                                        },
+                                        {
+                                            "type": "object",
+                                            "properties": {
+                                                "data": {
+                                                    "$ref": "#/components/schemas/DubbingExportPending"
+                                                }
+                                            }
+                                        }
+                                    ]
+                                },
+                                "example": {
+                                    "success": true,
+                                    "message": "Operation successful",
+                                    "data": {
+                                        "pending": true,
+                                        "request_id": "5d1f7c3e-8a20-4b6d-9f11-2c7a4e0b3d99"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "410": {
+                        "$ref": "#/components/responses/Gone"
+                    },
+                    "422": {
+                        "description": "Nothing to export, or the balance does not cover an export that still has to be\npaid for.\n\n\"Nothing to export\" is final rather than a \"not yet\": either the project has no\nvideo to hand over and none can be built (an audio-only source), or it has not\nbeen rendered. Render it first; retrying the export alone will not change the\nanswer.\n",
+                        "content": {
+                            "application/json": {
+                                "schema": {
+                                    "$ref": "#/components/schemas/Error"
+                                },
+                                "examples": {
+                                    "nothingToExport": {
+                                        "summary": "No video, and none can be assembled",
+                                        "value": {
+                                            "success": false,
+                                            "error": {
+                                                "message": "There is no rendered video to export yet. Render the project first.",
+                                                "code": 422,
+                                                "type": "validation_failed",
+                                                "data": null
+                                            }
+                                        }
+                                    },
+                                    "balance": {
+                                        "summary": "An unpaid dub the balance does not cover",
+                                        "value": {
+                                            "success": false,
+                                            "error": {
+                                                "message": "Your balance is not sufficient for this operation.",
+                                                "code": 422,
+                                                "type": "validation_failed",
+                                                "data": null
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        "/services/dubbing/get-projects": {
+            "get": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "List dubbing projects",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/Page"
+                    },
+                    {
+                        "name": "title",
+                        "in": "query",
+                        "schema": {
+                            "type": "string"
+                        }
+                    },
+                    {
+                        "name": "status",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    {
+                        "name": "language_id",
+                        "in": "query",
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/ProjectList"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    }
+                }
+            }
+        },
+        "/services/dubbing/update-title/{projectId}": {
+            "put": {
+                "tags": [
+                    "Dubbing"
+                ],
+                "summary": "Rename a project",
+                "parameters": [
+                    {
+                        "$ref": "#/components/parameters/ProjectId"
+                    }
+                ],
+                "requestBody": {
+                    "required": true,
+                    "content": {
+                        "application/json": {
+                            "schema": {
+                                "type": "object",
+                                "required": [
+                                    "title"
+                                ],
+                                "properties": {
+                                    "title": {
+                                        "type": "string",
+                                        "minLength": 3,
+                                        "maxLength": 255
+                                    }
+                                }
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "$ref": "#/components/responses/Ok"
+                    },
+                    "401": {
+                        "$ref": "#/components/responses/Unauthorized"
+                    },
+                    "404": {
+                        "$ref": "#/components/responses/NotFound"
+                    },
+                    "422": {
+                        "$ref": "#/components/responses/ValidationError"
+                    }
+                }
+            }
+        }
+    },
+    "components": {
+        "securitySchemes": {
+            "ApiKeyAuth": {
+                "type": "apiKey",
+                "in": "header",
+                "name": "X-API-KEY",
+                "description": "The account's API key, from **app.voices.az → Profile → API key**.\nAlso accepted as a bare `Authorization` header (no `Bearer` prefix) for\ncompatibility with the published PHP client. Never send it in a query string.\n"
+            }
+        },
+        "parameters": {
+            "ProjectId": {
+                "name": "projectId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "integer"
+                }
+            },
+            "BlockId": {
+                "name": "blockId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string"
+                }
+            },
+            "ChunkId": {
+                "name": "chunkId",
+                "in": "path",
+                "required": true,
+                "schema": {
+                    "type": "string"
+                }
+            },
+            "Page": {
+                "name": "page",
+                "in": "query",
+                "schema": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 1
+                }
+            },
+            "IdempotencyKey": {
+                "name": "Idempotency-Key",
+                "in": "header",
+                "required": false,
+                "description": "Makes this call safe to retry. See **Idempotency** in the introduction.\n\nUse a fresh value (a uuid) per operation you want performed once. Sending the same\nvalue again with the same body replays the first response and carries\n`Idempotent-Replayed: true`; with a different body it answers `422`\n(`idempotency_key_reused`); while the first call is still running it answers `409`\n(`idempotency_in_progress`). Records are kept for 24 hours.\n",
+                "schema": {
+                    "type": "string",
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9._:-]{1,64}$",
+                    "example": "8e6c3f0a-2a7d-4a5e-9f2b-7b1c0d4e5a66"
+                }
+            }
+        },
+        "schemas": {
+            "Envelope": {
+                "type": "object",
+                "properties": {
+                    "success": {
+                        "type": "boolean",
+                        "example": true
+                    },
+                    "message": {
+                        "type": "string",
+                        "example": "Operation successful"
+                    },
+                    "data": {
+                        "type": "object",
+                        "nullable": true
+                    }
+                }
+            },
+            "Error": {
+                "type": "object",
+                "properties": {
+                    "success": {
+                        "type": "boolean",
+                        "example": false
+                    },
+                    "error": {
+                        "type": "object",
+                        "properties": {
+                            "message": {
+                                "type": "string",
+                                "description": "Human-readable, localised by `Accept-Language`. Do not branch on it."
+                            },
+                            "code": {
+                                "type": "integer",
+                                "description": "HTTP status."
+                            },
+                            "type": {
+                                "type": "string",
+                                "description": "Stable machine-readable slug.",
+                                "enum": [
+                                    "bad_request",
+                                    "unauthenticated",
+                                    "forbidden",
+                                    "not_found",
+                                    "method_not_allowed",
+                                    "conflict",
+                                    "gone",
+                                    "payload_too_large",
+                                    "validation_failed",
+                                    "rate_limited",
+                                    "server_error",
+                                    "service_unavailable",
+                                    "request_failed",
+                                    "api_key_scope",
+                                    "idempotency_key_invalid",
+                                    "idempotency_key_reused",
+                                    "idempotency_in_progress"
+                                ]
+                            },
+                            "data": {
+                                "type": "object",
+                                "nullable": true
+                            }
+                        }
+                    }
+                }
+            },
+            "Language": {
+                "type": "object",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "example": 6
+                    },
+                    "code": {
+                        "type": "string",
+                        "example": "az"
+                    },
+                    "title": {
+                        "type": "string",
+                        "example": "Azerbaijani"
+                    }
+                }
+            },
+            "Price": {
+                "type": "object",
+                "properties": {
+                    "amount": {
+                        "type": "string",
+                        "example": "0.30"
+                    },
+                    "currency": {
+                        "type": "string",
+                        "example": "AZN"
+                    }
+                }
+            },
+            "ProjectStatus": {
+                "type": "object",
+                "description": "`1` Draft · `2` In progress · `3` Completed · `4` Ordered · `5` Rejected ·\n`6` Waiting for ordering.\n",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "example": 3
+                    },
+                    "title": {
+                        "type": "string",
+                        "example": "Completed"
+                    }
+                }
+            },
+            "Project": {
+                "type": "object",
+                "description": "The shape every project-returning endpoint hands back — the `get-projects` lists of\nall three services, the single-project read, and the calls that echo the project\nback after a write (`init`, `update-title`, the dubbing settings). `body` is\nservice-specific and is shown in the examples of that service's own endpoints.\n",
+                "properties": {
+                    "id": {
+                        "type": "integer",
+                        "example": 7420
+                    },
+                    "title": {
+                        "type": "string",
+                        "example": "promo.mp4"
+                    },
+                    "is_favorite": {
+                        "type": "boolean",
+                        "example": false
+                    },
+                    "is_expired": {
+                        "type": "boolean",
+                        "example": false,
+                        "description": "The project outlived its retention window and its files were deleted — see\n**Retention**. The project itself is still here and still listed, but every url\nunder `body` is `null` and the calls that touch files answer `410`.\n"
+                    },
+                    "expired_at": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": null,
+                        "description": "When the files were deleted, ISO-8601 with offset\n(`\"2026-03-18T04:00:11+04:00\"`). `null` while the project still has them, so it\nis `null` exactly when `is_expired` is `false`.\n"
+                    },
+                    "is_paid": {
+                        "type": "boolean",
+                        "example": true,
+                        "description": "The project's own price has already been charged, so handing the files over\ndoes not charge again.\n\nFor dubbing that happens on the first full `generate`, and\n`POST /services/dubbing/export/{projectId}` is free from then on. A dub made\nbefore that rule carries no such marker and is charged on its first export\ninstead, so it reads `false` until that export goes through. For the services\nthat charge on download it turns `true` together with the `Ordered` (4) status.\n"
+                    },
+                    "language": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/Language"
+                            }
+                        ],
+                        "nullable": true
+                    },
+                    "status": {
+                        "$ref": "#/components/schemas/ProjectStatus"
+                    },
+                    "duration": {
+                        "type": "number",
+                        "example": 92,
+                        "description": "Seconds of processed audio or video."
+                    },
+                    "price": {
+                        "allOf": [
+                            {
+                                "$ref": "#/components/schemas/Price"
+                            }
+                        ],
+                        "nullable": true,
+                        "description": "Omitted entirely while the project has no quote yet."
+                    },
+                    "body": {
+                        "type": "object",
+                        "description": "Service-specific payload. Every url in it is `null` on an expired project.\n"
+                    }
+                }
+            },
+            "DubbingBody": {
+                "type": "object",
+                "description": "`body` of a dubbing project. Read-only: everything in it is written by the\npipeline, not by the client.\n\nThe watermark-free files and the secret directory they live under are deliberately\nabsent — they are handed out by `POST /services/dubbing/export/{projectId}` alone.\nSo is the render's own clock: `rendered_at` is NOT part of the payload, and the only\nthing a client needs from it is already applied, as the `?v=` stamp on the urls.\n",
+                "properties": {
+                    "source_path": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Storage key of the source the project was created from."
+                    },
+                    "youtube_url": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "The source URL, for a project created from YouTube."
+                    },
+                    "source_video_url": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Playable copy of the original video, stored for a YouTube source once it has\nbeen downloaded. `null` for an uploaded source.\n"
+                    },
+                    "video_url": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": null,
+                        "description": "`null` for every project rendered since 2026-09-15 — a render produces the\nsoundtrack only, and the downloadable mp4 is assembled on demand by `export`.\nPlay `audio_url` over the source video instead. Projects rendered earlier keep\nthe url they had. Carries a `?v=` stamp when present; use it as given.\n"
+                    },
+                    "audio_url": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/dubbed.mp3?v=1757923200",
+                        "description": "The dubbed soundtrack of the last render, with the preview watermark. The\n`?v=` suffix is a cache-buster that changes with every render: the object is\noverwritten in place, so a url with the stamp stripped can serve the previous\nrender for hours. Use the url exactly as it is given.\n"
+                    },
+                    "duration_ms": {
+                        "type": "integer",
+                        "example": 92400
+                    },
+                    "source_lang": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "en"
+                    },
+                    "target_lang": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "az"
+                    },
+                    "background_mode": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                            "duck",
+                            "demucs",
+                            null
+                        ]
+                    },
+                    "num_speakers": {
+                        "type": "integer",
+                        "nullable": true,
+                        "example": 2
+                    },
+                    "overlap_pan": {
+                        "type": "boolean",
+                        "example": true
+                    },
+                    "auto_emotion": {
+                        "type": "boolean",
+                        "example": false,
+                        "description": "Whether the emotion of every line is picked automatically and voiced with the\nmatching style of the speaker's voice.\n"
+                    },
+                    "auto_emotion_paid_at": {
+                        "type": "string",
+                        "format": "date-time",
+                        "nullable": true,
+                        "example": null,
+                        "description": "When the surcharge for it was charged, or `null` while it is still owed. It is\ntaken once - with the first `generate` if the switch was on by then, otherwise\nwith the next `render` - and after that the switch costs nothing to change.\n"
+                    },
+                    "percentage": {
+                        "type": "integer",
+                        "example": 100
+                    },
+                    "stage": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Pipeline stage of the last run — `preview_ready` after a preview, `done` after a full dub.",
+                        "example": "done"
+                    },
+                    "preview_audio_url": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "Preview soundtrack of older projects, kept for compatibility."
+                    },
+                    "estimate": {
+                        "type": "object",
+                        "nullable": true,
+                        "description": "Volume figures measured while preparing the source. Informative only — the\nprice is the per-minute dubbing tariff and is reported as the project's `price`.\n"
+                    },
+                    "render_count": {
+                        "type": "integer",
+                        "example": 1,
+                        "description": "Renders already used, so a client can say \"N of M free\" before starting one."
+                    },
+                    "preview_count": {
+                        "type": "integer",
+                        "example": 1,
+                        "description": "Previews already used."
+                    },
+                    "export_status": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                            "pending",
+                            "failed",
+                            "no_video",
+                            null
+                        ],
+                        "description": "State of the LAST mp4 assembly started by `POST /services/dubbing/export/{projectId}`.\n\n* `pending` — an assembly is running; `export` answers `202` with the same\n  `export_request_id`.\n* `failed` — that attempt died. The next `export` starts a fresh one; the\n  project itself is unaffected.\n* `no_video` — the source has no video track at all, so there is nothing to\n  assemble, ever; `export` answers `422`.\n* `null` — nothing to report. After a successful assembly the field clears, and\n  the next `export` answers `200` with the file.\n"
+                    },
+                    "export_request_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "nullable": true,
+                        "description": "The run id of that assembly, the same value `export` returned with its `202`.\nUsable with `GET /services/dubbing/get-response/{requestId}` for stage and\npercentage.\n"
+                    },
+                    "speakers": {
+                        "type": "array",
+                        "description": "Detected speakers. The `key` of each is what `voice_map` expects.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "key": {
+                                    "type": "string",
+                                    "example": "SPEAKER_00"
+                                },
+                                "gender": {
+                                    "type": "string",
+                                    "example": "male"
+                                }
+                            }
+                        }
+                    },
+                    "chunks": {
+                        "type": "array",
+                        "description": "The per-line timeline - source text, translation, timing, voice-over.\n\nTwo fields on a line are about the emotion: `emotion` (`{label, score}`,\nmeasured on the source voice of that line and present whether or not the\nautomatic selection is on - `unknown` when the line is too short to judge) and\n`vo.auto_style`, the style that was picked automatically for the take that is\ncurrently there. `vo.auto_style` is absent when the take was recorded with the\nspeaker's own voice or with one chosen by hand.\n",
+                        "items": {
+                            "type": "object"
+                        }
+                    }
+                }
+            },
+            "DubbingExport": {
+                "type": "object",
+                "description": "The `200` payload of `POST /services/dubbing/export/{projectId}`.",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "example": "promo.mp4"
+                    },
+                    "file": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "The muxed mp4, without the watermark. Carries a `?v=` cache-buster — use the\nurl exactly as given.\n",
+                        "example": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/clean/9fK2mQ7xR1vT4wYz/dubbed.mp4?v=1757923200"
+                    },
+                    "audio": {
+                        "type": "string",
+                        "nullable": true,
+                        "description": "The soundtrack alone, without the watermark. Same `?v=` rule.",
+                        "example": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/clean/9fK2mQ7xR1vT4wYz/dubbed.mp3?v=1757923200"
+                    }
+                }
+            },
+            "DubbingExportPending": {
+                "type": "object",
+                "description": "The `202` payload of `POST /services/dubbing/export/{projectId}`: no file yet, one\nis being assembled.\n",
+                "required": [
+                    "pending",
+                    "request_id"
+                ],
+                "properties": {
+                    "pending": {
+                        "type": "boolean",
+                        "enum": [
+                            true
+                        ],
+                        "example": true,
+                        "description": "Always `true`. Its presence is what distinguishes a `202` body from a `200` one."
+                    },
+                    "request_id": {
+                        "type": "string",
+                        "format": "uuid",
+                        "example": "5d1f7c3e-8a20-4b6d-9f11-2c7a4e0b3d99",
+                        "description": "The assembly's run id, mirrored into the project as `body.export_request_id`.\nA second `export` while it is running returns this same id.\n"
+                    }
+                }
+            },
+            "SynthesizeRequest": {
+                "type": "object",
+                "required": [
+                    "text"
+                ],
+                "properties": {
+                    "text": {
+                        "type": "string",
+                        "maxLength": 7000,
+                        "description": "May contain the inline tags described under **Text tags** — `[PAUSE=1.5]`,\n`[LAUGH]`, `[SIGH]`, `[UHM]`, `[SHH]`. They count towards `maxLength`;\nunknown tags are removed before synthesis.\n"
+                    },
+                    "language_id": {
+                        "type": "integer",
+                        "description": "From `GET /languages`. Defaults to the site language."
+                    },
+                    "voice_id": {
+                        "type": "integer",
+                        "description": "From `GET /get-voices`. Defaults to a public voice of the chosen language."
+                    },
+                    "speed": {
+                        "type": "number",
+                        "enum": [
+                            1,
+                            1.5,
+                            2,
+                            2.5,
+                            3
+                        ],
+                        "default": 1
+                    }
+                }
+            }
+        },
+        "responses": {
+            "Ok": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Envelope"
+                        }
+                    }
+                }
+            },
+            "ProjectList": {
+                "description": "OK",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "allOf": [
+                                {
+                                    "$ref": "#/components/schemas/Envelope"
+                                },
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "data": {
+                                            "type": "object",
+                                            "properties": {
+                                                "projects": {
+                                                    "type": "object",
+                                                    "properties": {
+                                                        "data": {
+                                                            "type": "array",
+                                                            "items": {
+                                                                "$ref": "#/components/schemas/Project"
+                                                            }
+                                                        },
+                                                        "meta": {
+                                                            "type": "object"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            ]
+                        },
+                        "example": {
+                            "success": true,
+                            "message": "Operation successful",
+                            "data": {
+                                "projects": {
+                                    "data": [
+                                        {
+                                            "id": 7420,
+                                            "title": "promo.mp4",
+                                            "is_favorite": false,
+                                            "is_expired": false,
+                                            "expired_at": null,
+                                            "is_paid": true,
+                                            "language": {
+                                                "id": 6,
+                                                "code": "az",
+                                                "title": "Azerbaijani"
+                                            },
+                                            "status": {
+                                                "id": 4,
+                                                "title": "Ordered"
+                                            },
+                                            "duration": 92,
+                                            "price": {
+                                                "amount": "2.10",
+                                                "currency": "AZN"
+                                            }
+                                        },
+                                        {
+                                            "id": 6188,
+                                            "title": "teaser.mp4",
+                                            "is_favorite": false,
+                                            "is_expired": true,
+                                            "expired_at": "2026-03-18T04:00:11+04:00",
+                                            "is_paid": true,
+                                            "language": {
+                                                "id": 6,
+                                                "code": "az",
+                                                "title": "Azerbaijani"
+                                            },
+                                            "status": {
+                                                "id": 4,
+                                                "title": "Ordered"
+                                            },
+                                            "duration": 41,
+                                            "price": {
+                                                "amount": "0.95",
+                                                "currency": "AZN"
+                                            }
+                                        }
+                                    ],
+                                    "meta": {
+                                        "current_page": 1,
+                                        "last_page": 3,
+                                        "per_page": 20,
+                                        "total": 47
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "Unauthorized": {
+                "description": "Missing, unknown, revoked or query-string-borne API key, or an account that is not\nactive.\n",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        },
+                        "example": {
+                            "success": false,
+                            "error": {
+                                "message": "Unauthorized access",
+                                "code": 401,
+                                "type": "unauthenticated",
+                                "data": null
+                            }
+                        }
+                    }
+                }
+            },
+            "NotFound": {
+                "description": "No such resource, or it belongs to another account — the API does not distinguish\nthe two.\n",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        },
+                        "example": {
+                            "success": false,
+                            "error": {
+                                "message": "Data not found",
+                                "code": 404,
+                                "type": "not_found",
+                                "data": null
+                            }
+                        }
+                    }
+                }
+            },
+            "Gone": {
+                "description": "The project outlived its retention window: its files were deleted and this call\nacts on them — see **Retention** in the introduction. The project itself is still\nreadable, still listed and still renamable; only the file operations are refused,\nand retrying never helps because the files cannot be restored.\n\n`error.data` carries the project id and the moment the files went — the same value\nthe project's own `expired_at` reports.\n",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        },
+                        "example": {
+                            "success": false,
+                            "error": {
+                                "message": "This project's retention period has ended and its files were deleted",
+                                "code": 410,
+                                "type": "gone",
+                                "data": {
+                                    "project_id": 7420,
+                                    "expired_at": "2026-03-18T04:00:11+04:00"
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "IdempotencyInProgress": {
+                "description": "Another request with the same `Idempotency-Key` is still being processed. Wait for\nit to finish and retry with the same key — the retry will replay its response.\n",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        },
+                        "example": {
+                            "success": false,
+                            "error": {
+                                "message": "A request with this Idempotency-Key is still being processed. Retry in a few seconds.",
+                                "code": 409,
+                                "type": "idempotency_in_progress",
+                                "data": null
+                            }
+                        }
+                    }
+                }
+            },
+            "ValidationError": {
+                "description": "The request did not pass validation.",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        },
+                        "example": {
+                            "success": false,
+                            "error": {
+                                "message": "The text field is required.",
+                                "code": 422,
+                                "type": "validation_failed",
+                                "data": null
+                            }
+                        }
+                    }
+                }
+            },
+            "TooManyRequests": {
+                "description": "Over the per-key budget (60 requests/minute, 5000/day). Wait `Retry-After`\nseconds.\n",
+                "headers": {
+                    "Retry-After": {
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    "X-RateLimit-Limit": {
+                        "schema": {
+                            "type": "integer"
+                        }
+                    },
+                    "X-RateLimit-Remaining": {
+                        "schema": {
+                            "type": "integer"
+                        }
+                    }
+                },
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/Error"
+                        },
+                        "example": {
+                            "success": false,
+                            "error": {
+                                "message": "Too many attempts. Please try again later.",
+                                "code": 429,
+                                "type": "rate_limited",
+                                "data": null
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
