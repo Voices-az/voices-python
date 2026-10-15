@@ -65,8 +65,16 @@ with voices_az.Client() as client:
 right away; call `client.tts.wait(request_id)` later). The text may contain inline tags:
 `[PAUSE=1.5]`, `[LAUGH]`, `[SIGH]`, `[UHM]`, `[SHH]`.
 
-Multi-block projects: `client.tts.add_block()`, `update_block()`, `delete_block()`, then
-`client.tts.generate(project_id, wait=True)`.
+Multi-block projects, one voice per block if you like:
+
+```python
+first = client.tts.add_block("Salam!", voice=41)
+client.tts.add_block("Xoş gəlmisiniz.", project_id=first.project_id, voice=58, speed=1.5)
+client.tts.generate(first.project_id, wait=True)
+```
+
+Also `update_block()` (text, speed, voice), `delete_block()`, `duplicate_block()` and
+`sort_blocks()`.
 
 ### Voices and languages
 
@@ -123,7 +131,8 @@ client.dubbing.download(draft.project_id, "dubbed.mp4", audio_path="dubbed.mp3")
 ```
 
 `download()` asks for the clean (watermark-free) files and, when the video still has to be
-assembled, waits for it. Choose a voice per speaker with
+assembled, waits for it. A project made from an audio file (mp3, wav) is exported as the
+dubbed mp3 (`export().audio_only` is `True`). Choose a voice per speaker with
 `generate(..., voice_map={"SPEAKER_00": 41})` - the speaker keys are in
 `client.dubbing.get_project(id).body["speakers"]`. Edit single lines with `add_chunk()`,
 `update_chunk()`, `delete_chunk()`, `regenerate_chunk()`, then `render()`.

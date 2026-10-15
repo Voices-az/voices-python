@@ -693,8 +693,9 @@ class DubbingExport:
 
     When ``pending`` is ``True`` the mp4 is still being assembled (HTTP ``202``):
     ``request_id`` identifies the assembly and ``file``/``audio`` are ``None``. Otherwise
-    ``file`` is the clean mp4 and ``audio`` the clean soundtrack. Use the urls exactly as
-    given (they carry a ``?v=`` cache-buster).
+    ``file`` is the clean mp4 and ``audio`` the clean soundtrack - or, when
+    ``audio_only`` is ``True`` (a project made from an audio file), both are the dubbed
+    mp3. Use the urls exactly as given (they carry a ``?v=`` cache-buster).
     """
 
     pending: bool
@@ -702,13 +703,15 @@ class DubbingExport:
     file: Optional[str] = None
     audio: Optional[str] = None
     request_id: Optional[str] = None
+    audio_only: bool = False
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], status_code: int = 200) -> DubbingExport:
         pending = bool(data.get("pending")) or status_code == 202
         return cls(pending=pending, title=data.get("title"), file=data.get("file"),
-                   audio=data.get("audio"), request_id=data.get("request_id"), raw=dict(data))
+                   audio=data.get("audio"), request_id=data.get("request_id"),
+                   audio_only=bool(data.get("audio_only")), raw=dict(data))
 
 
 @dataclass

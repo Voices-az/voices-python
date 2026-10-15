@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.2.0 - 2026-10-15
+
+Follows the Voices.az API update of 2026-10-15. Deploy order: the API first - this version
+sends the new field names below, which older API versions do not know.
+
+- `tts.add_block()` takes `voice`, `language` and `speed`, so a multi-block project can
+  mix voices; `tts.update_block()` takes `voice`.
+- New `tts.sort_blocks()` and `tts.duplicate_block()`.
+- New `voices.page()`: a voice page with its pagination figures (`total`, `last_page`,
+  `has_more`). `voices.iter()` follows them, uses the real page size (24), and stops
+  instead of looping when a server answers every page with the same voices.
+- Dubbing: `DubbingExport.audio_only`; `download()` saves the dubbed mp3 of a project made
+  from an audio file (as `.mp3`).
+- Wire names: `background_mode="separate"` and the speech-to-text `remove_background`
+  field are sent under their public names. The former spelling of `separate` is still
+  accepted as input and sent as `separate`.
+
 ## 0.1.0 - 2026-10-14
 
 First release.

@@ -67,8 +67,9 @@ def test_recognize_file_and_wait(client, api, tmp_path, fake_time):
     assert "Content-Type: audio/mpeg" in body
     assert 'name="language_id"\r\n\r\n6' in body
     assert 'name="diarize"\r\n\r\n2' in body
-    # Booleans travel as 1/0 - the API's validator rejects "true"/"false".
-    assert 'name="demucs"\r\n\r\n1' in body
+    # Booleans travel as 1/0, which every API version accepts.
+    assert 'name="remove_background"\r\n\r\n1' in body
+    assert 'name="demucs"' not in body
     assert 'name="convert_numbers"\r\n\r\n0' in body
     assert "youtube_url" not in body
 

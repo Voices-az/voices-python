@@ -263,6 +263,42 @@ def test_multi_block_project(client, api, fake_time):
     assert done.is_completed and done.project_id == 5822
 
 
+def test_blocks_with_their_own_voice_speed_and_language(client, api):
+    api.get("/languages").mock(return_value=ok({"languages": LANGUAGES}))
+    add = api.post("/services/text-to-speech/add-block").mock(return_value=ok({
+        "id": "b3", "project_id": 5822, "text": "Privet", "sort_order": 3, "speed": 1.5,
+        "language": LANGUAGES[2], "voice": {"id": 58, "full_name": "Murad"}}))
+    block = client.tts.add_block("Privet", project_id=5822, voice=58, language="ru",
+                                 speed=1.5)
+    assert block.voice["id"] == 58 and block.language.code == "ru" and block.speed == 1.5
+    assert json.loads(add.calls.last.request.content) == {
+        "project_id": 5822, "text": "Privet", "voice_id": 58, "language_id": 2, "speed": 1.5}
+
+    upd = api.put("/services/text-to-speech/5822/b3").mock(return_value=ok({
+        "block": {"id": "b3", "voice_id": 41, "voice": {"id": 41, "full_name": "Aysel"}}}))
+    assert client.tts.update_block(5822, "b3", text="Salam", voice=41)["voice"]["id"] == 41
+    assert json.loads(upd.calls.last.request.content) == {"text": "Salam", "speed": 1,
+                                                          "voice_id": 41}
+    with pytest.raises(TypeError):
+        client.tts.add_block("x", voice="Aysel")
+
+
+def test_sort_and_duplicate_blocks(client, api):
+    sort = api.post("/services/text-to-speech/sort/5822").mock(return_value=ok({
+        "project": {"id": 5822, "title": "t", "status": {"id": 1, "title": "Draft"},
+                    "body": {"blocks": [{"id": "b2"}, {"id": "b1"}]}}}))
+    project = client.tts.sort_blocks(5822, ["b2", "b1"])
+    assert project.id == 5822 and [b["id"] for b in project.body["blocks"]] == ["b2", "b1"]
+    assert json.loads(sort.calls.last.request.content) == {"sort_data": ["b2", "b1"]}
+    with pytest.raises(ValueError):
+        client.tts.sort_blocks(5822, [])
+
+    dup = api.put("/services/text-to-speech/duplicate-block/5822/b1").mock(
+        return_value=ok({"block": {"id": "b9", "text": "Bir", "voice_id": 41}}))
+    assert client.tts.duplicate_block(5822, "b1")["id"] == "b9"
+    assert dup.call_count == 1
+
+
 def test_block_ids_are_escaped(client, api):
     route = api.delete("/services/text-to-speech/1/a b").mock(return_value=ok(None))
     client.tts.delete_block(1, "a b")

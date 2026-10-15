@@ -49,8 +49,9 @@ DEFAULT_EXPORT_TIMEOUT = 1800.0
 #: How many failed mp4 assemblies ``download`` restarts before giving up.
 MAX_EXPORT_RESTARTS = 2
 
-#: ``background_mode`` values. ``separate`` is an alias of the API value ``demucs``.
-BACKGROUND_MODES = {"duck": "duck", "separate": "demucs", "demucs": "demucs"}
+#: ``background_mode`` values: ``duck`` and ``separate``. The former API spelling of
+#: ``separate`` is still accepted on input and sent as ``separate``.
+BACKGROUND_MODES = {"duck": "duck", "separate": "separate", "demucs": "separate"}
 
 VoiceMap = Mapping[str, Union[int, Voice, Mapping[str, Any]]]
 
@@ -225,7 +226,9 @@ def _download_op(project_id: int, path: Optional[DestInput], audio_path: Optiona
     if path is not None:
         if not exported.file:
             raise VoicesError(f"Project {project_id} has no video file to download.")
-        written = yield Download(exported.file, _dest(path, project_id, "mp4"))
+        # An audio-only source is exported as audio: ``file`` is then the mp3.
+        ext = "mp3" if exported.audio_only else "mp4"
+        written = yield Download(exported.file, _dest(path, project_id, ext))
     if audio_path is not None:
         if not exported.audio:
             raise VoicesError(f"Project {project_id} has no soundtrack to download.")
@@ -443,6 +446,9 @@ class Dubbing(SyncResource):
         on_progress: Optional[ProgressCallback] = None,
     ) -> Any:
         """Export the clean files, waiting for the mp4 assembly if needed, and save them.
+
+        A project made from an audio file (mp3, wav) has no video: its export is the dubbed
+        mp3, saved to ``path`` (``.mp3`` when a directory is given).
 
         Args:
             path: Where to save the mp4 (a file path, an existing directory, or a binary

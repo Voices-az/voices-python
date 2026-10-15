@@ -170,10 +170,15 @@ async def test_async_download_variants(aclient, api, tmp_path):
 
 
 async def test_async_voices_iter_and_request(aclient, api):
-    api.get("/get-voices/1").mock(return_value=ok({"voices": [{"id": i} for i in range(20)]}))
-    api.get("/get-voices/2").mock(return_value=ok({"voices": [{"id": 20}]}))
+    api.get("/get-voices/1").mock(return_value=ok({"voices": [{"id": i} for i in range(24)]}))
+    api.get("/get-voices/2").mock(return_value=ok({"voices": [{"id": 24}]}))
     ids = [v.id async for v in aclient.voices.iter()]
-    assert ids == list(range(21))
+    assert ids == list(range(25))
+    api.get("/get-voices/3").mock(return_value=ok({
+        "voices": [{"id": 50}], "meta": {"current_page": 3, "last_page": 3, "per_page": 24,
+                                         "total": 49}}))
+    page = await aclient.voices.page(page=3)
+    assert page.total == 49 and not page.has_more
     api.get("/service/tts").mock(return_value=ok({"service": {"slug": "tts"}}))
     assert (await aclient.request("GET", "/service/tts"))["service"]["slug"] == "tts"
 

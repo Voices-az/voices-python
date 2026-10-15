@@ -41,7 +41,8 @@ def test_create_from_file(client, api, tmp_path):
     assert "Content-Type: video/mp4" in body
     assert 'name="language_id"\r\n\r\n6' in body
     assert 'name="source_language_id"\r\n\r\n1' in body
-    assert 'name="background_mode"\r\n\r\ndemucs' in body
+    # The neutral name goes on the wire (the API accepts it since 2026-10-15).
+    assert 'name="background_mode"\r\n\r\nseparate' in body
     assert 'name="num_speakers"\r\n\r\n2' in body
     assert 'name="overlap_pan"\r\n\r\n0' in body
     assert 'name="auto_emotion"\r\n\r\n1' in body
@@ -147,6 +148,29 @@ def test_export_ready(client, api):
     assert not exported.pending
     assert exported.file == MP4 and exported.audio == MP3
     assert "Idempotency-Key" not in route.calls.last.request.headers
+
+
+def test_an_audio_source_exports_and_downloads_as_mp3(client, api, tmp_path):
+    api.post(EXPORT).mock(return_value=ok({"title": "talk.mp3", "file": MP3, "audio": MP3,
+                                           "audio_only": True}))
+    exported = client.dubbing.export(P)
+    assert exported.audio_only and exported.file == MP3 and not exported.pending
+    api.get(MP3).mock(return_value=httpx.Response(200, content=b"ID3"))
+    saved = client.dubbing.download(P, tmp_path)
+    assert saved.name == f"voices-dub-{P}.mp3" and saved.read_bytes() == b"ID3"
+
+
+def test_export_reports_video(client, api):
+    api.post(EXPORT).mock(return_value=ok({"title": "t", "file": MP4, "audio": MP3,
+                                           "audio_only": False}))
+    assert client.dubbing.export(P).audio_only is False
+
+
+def test_former_background_mode_spelling_is_sent_as_separate(client, api):
+    settings = api.put(f"/services/dubbing/{P}/settings").mock(return_value=ok({
+        "project": project(P, 4)}))
+    client.dubbing.update_settings(P, background_mode="demucs")
+    assert json.loads(settings.calls.last.request.content) == {"background_mode": "separate"}
 
 
 def test_export_pending(client, api):

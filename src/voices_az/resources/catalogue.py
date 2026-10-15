@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from typing import AsyncIterator, Iterator, List, Mapping, Optional
+from typing import Any, AsyncIterator, Iterator, List, Mapping, Optional, Set
 
 from .._base import Call
-from ..types import Language, Service, Voice
+from ..types import Language, Page, Service, Voice
 from ._common import (
     AsyncResource,
     LanguageInput,
@@ -18,7 +18,7 @@ from ._common import (
 
 __all__ = ["Languages", "AsyncLanguages", "Voices", "AsyncVoices", "Services", "AsyncServices"]
 
-VOICES_PER_PAGE = 20
+VOICES_PER_PAGE = 24
 _GENDERS = {"female": 1, "woman": 1, "f": 1, "male": 2, "man": 2, "m": 2}
 
 
@@ -32,15 +32,50 @@ def _gender_id(gender: object) -> Optional[int]:
     raise ValueError("gender must be 'female' / 'male' (or 1 / 2)")
 
 
-def _voices_op(state: object, page: int, language: Optional[LanguageInput],
-               gender: object, title: Optional[str]) -> Op[List[Voice]]:
+def _int_or_none(value: Any) -> Optional[int]:
+    try:
+        return int(value) if value is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _voices_page_op(state: object, page: int, language: Optional[LanguageInput],
+                    gender: object, title: Optional[str]) -> Op[Page[Voice]]:
     if page < 1:
         raise ValueError("page starts at 1")
     language_id = yield from resolve_language(state, language)
     data = yield Call("GET", f"/get-voices/{int(page)}", params={
         "language_id": language_id, "gender": _gender_id(gender), "title": title,
     })
-    return [Voice.from_dict(x) for x in _items(data, "voices") if isinstance(x, Mapping)]
+    items = [Voice.from_dict(x) for x in _items(data, "voices") if isinstance(x, Mapping)]
+    meta = data.get("meta") if isinstance(data, Mapping) else None
+    meta = meta if isinstance(meta, Mapping) else {}
+    return Page(items=items, current_page=_int_or_none(meta.get("current_page")),
+                last_page=_int_or_none(meta.get("last_page")),
+                per_page=_int_or_none(meta.get("per_page")),
+                total=_int_or_none(meta.get("total")),
+                raw=dict(data) if isinstance(data, Mapping) else {})
+
+
+def _voices_op(state: object, page: int, language: Optional[LanguageInput],
+               gender: object, title: Optional[str]) -> Op[List[Voice]]:
+    result = yield from _voices_page_op(state, page, language, gender, title)
+    return result.items
+
+
+def _fresh(result: Page[Voice], seen: Set[int]) -> List[Voice]:
+    """The voices of a page not yielded yet. A page of nothing new ends the walk: older
+    servers answered every page number with the first page."""
+    fresh = [v for v in result.items if v.id not in seen]
+    seen.update(v.id for v in fresh)
+    return fresh
+
+
+def _is_last(result: Page[Voice]) -> bool:
+    """The server's ``meta`` when it sends one, the page size otherwise."""
+    if result.last_page is not None and result.current_page is not None:
+        return not result.has_more
+    return len(result.items) < VOICES_PER_PAGE
 
 
 def _services_op() -> Op[List[Service]]:
@@ -76,8 +111,9 @@ class Voices(SyncResource):
 
     def list(self, *, page: int = 1, language: Optional[LanguageInput] = None,
              gender: Optional[object] = None, title: Optional[str] = None) -> List[Voice]:
-        """One page (20 voices) of public voices plus the account's own
-        (``GET /get-voices/{page}``).
+        """One page (24 voices) of public voices plus the account's own
+        (``GET /get-voices/{page}``). :meth:`page` returns the same voices with the
+        pagination figures.
 
         Args:
             page: Page number, from 1.
@@ -87,14 +123,24 @@ class Voices(SyncResource):
         """
         return self._run(_voices_op(self._client._state, page, language, gender, title))
 
+    def page(self, *, page: int = 1, language: Optional[LanguageInput] = None,
+             gender: Optional[object] = None, title: Optional[str] = None) -> Page[Voice]:
+        """Like :meth:`list`, as a :class:`~voices_az.types.Page` (``current_page``,
+        ``last_page``, ``per_page``, ``total``, ``has_more``)."""
+        return self._run(_voices_page_op(self._client._state, page, language, gender, title))
+
     def iter(self, *, language: Optional[LanguageInput] = None,
              gender: Optional[object] = None, title: Optional[str] = None,
              max_pages: int = 100) -> Iterator[Voice]:
         """Iterate over every matching voice, fetching pages as needed."""
+        seen: Set[int] = set()
         for page in range(1, max_pages + 1):
-            voices = self.list(page=page, language=language, gender=gender, title=title)
-            yield from voices
-            if len(voices) < VOICES_PER_PAGE:
+            result = self.page(page=page, language=language, gender=gender, title=title)
+            fresh = _fresh(result, seen)
+            if not fresh:
+                return
+            yield from fresh
+            if _is_last(result):
                 return
 
 
@@ -131,15 +177,26 @@ class AsyncVoices(AsyncResource):
         """See :meth:`Voices.list`."""
         return await self._run(_voices_op(self._client._state, page, language, gender, title))
 
+    async def page(self, *, page: int = 1, language: Optional[LanguageInput] = None,
+                   gender: Optional[object] = None,
+                   title: Optional[str] = None) -> Page[Voice]:
+        """See :meth:`Voices.page`."""
+        return await self._run(_voices_page_op(self._client._state, page, language, gender,
+                                               title))
+
     async def iter(self, *, language: Optional[LanguageInput] = None,
                    gender: Optional[object] = None, title: Optional[str] = None,
                    max_pages: int = 100) -> AsyncIterator[Voice]:
         """See :meth:`Voices.iter`."""
+        seen: Set[int] = set()
         for page in range(1, max_pages + 1):
-            voices = await self.list(page=page, language=language, gender=gender, title=title)
-            for voice in voices:
+            result = await self.page(page=page, language=language, gender=gender, title=title)
+            fresh = _fresh(result, seen)
+            if not fresh:
+                return
+            for voice in fresh:
                 yield voice
-            if len(voices) < VOICES_PER_PAGE:
+            if _is_last(result):
                 return
 
 

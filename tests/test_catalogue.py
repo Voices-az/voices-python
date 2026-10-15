@@ -52,18 +52,58 @@ def test_voice_bad_gender_and_page(client):
         client.voices.list(page=0)
 
 
-def test_voices_iter_walks_pages(client, api):
-    api.get("/get-voices/1").mock(return_value=ok({"voices": [voice(i) for i in range(20)]}))
-    api.get("/get-voices/2").mock(return_value=ok({"voices": [voice(i) for i in range(20, 25)]}))
+def meta(current, last, total):
+    return {"current_page": current, "last_page": last, "per_page": 24, "total": total}
+
+
+def test_voices_iter_walks_pages_by_meta(client, api):
+    api.get("/get-voices/1").mock(return_value=ok({"voices": [voice(i) for i in range(24)],
+                                                   "meta": meta(1, 2, 29)}))
+    api.get("/get-voices/2").mock(return_value=ok({"voices": [voice(i) for i in range(24, 29)],
+                                                   "meta": meta(2, 2, 29)}))
     ids = [v.id for v in client.voices.iter()]
-    assert ids == list(range(25))
+    assert ids == list(range(29))
+
+
+def test_voices_iter_stops_at_last_page_even_when_it_is_full(client, api):
+    first = api.get("/get-voices/1").mock(return_value=ok({
+        "voices": [voice(i) for i in range(24)], "meta": meta(1, 1, 24)}))
+    second = api.get("/get-voices/2").mock(return_value=ok({"voices": []}))
+    assert len(list(client.voices.iter())) == 24
+    assert first.call_count == 1 and second.call_count == 0
+
+
+def test_voices_iter_without_meta_falls_back_to_the_page_size(client, api):
+    api.get("/get-voices/1").mock(return_value=ok({"voices": [voice(i) for i in range(24)]}))
+    api.get("/get-voices/2").mock(return_value=ok({"voices": [voice(i) for i in range(24, 25)]}))
+    assert [v.id for v in client.voices.iter()] == list(range(25))
 
 
 def test_voices_iter_stops_on_empty_page(client, api):
-    api.get("/get-voices/1").mock(return_value=ok({"voices": [voice(i) for i in range(20)]}))
+    api.get("/get-voices/1").mock(return_value=ok({"voices": [voice(i) for i in range(24)]}))
     third = api.get("/get-voices/2").mock(return_value=ok({"voices": []}))
-    assert len(list(client.voices.iter(max_pages=5))) == 20
+    assert len(list(client.voices.iter(max_pages=5))) == 24
     assert third.call_count == 1
+
+
+def test_voices_iter_stops_when_a_page_repeats(client, api):
+    """Servers before 2026-10-15 answered every page number with the first page."""
+    def same(_request):
+        return ok({"voices": [voice(i) for i in range(24)]})
+
+    first = api.get("/get-voices/1").mock(side_effect=same)
+    second = api.get("/get-voices/2").mock(side_effect=same)
+    third = api.get("/get-voices/3").mock(side_effect=same)
+    assert len(list(client.voices.iter(max_pages=50))) == 24
+    assert (first.call_count, second.call_count, third.call_count) == (1, 1, 0)
+
+
+def test_voices_page_reports_pagination(client, api):
+    api.get("/get-voices/2").mock(return_value=ok({"voices": [voice(30)], "meta": meta(2, 3, 61)}))
+    page = client.voices.page(page=2)
+    assert [v.id for v in page] == [30]
+    assert (page.current_page, page.last_page, page.per_page, page.total) == (2, 3, 24, 61)
+    assert page.has_more
 
 
 def test_services(client, api):

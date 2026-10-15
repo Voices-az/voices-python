@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, Mapping, Optional, Union
+from typing import Any, Dict, Mapping, Optional, Sequence, Union
 
 from .._base import Call, Download
 from ..types import ExportedFile, JobStatus, Page, Project, Synthesis, TTSBlock
@@ -20,6 +20,7 @@ from ._common import (
     interval_of,
     new_idempotency_key,
     poll_op,
+    project_from,
     project_list_op,
     project_op,
     rename_op,
@@ -94,16 +95,37 @@ def _synthesize_op(state: Any, text: str, voice: Optional[VoiceInput],
     return result
 
 
-def _add_block_op(text: Optional[str], project_id: Optional[int]) -> Op[TTSBlock]:
-    data = yield Call("POST", f"/services/{SERVICE}/add-block",
-                      json={"project_id": project_id, "text": text})
+def _add_block_op(state: Any, text: Optional[str], project_id: Optional[int],
+                  voice: Optional[VoiceInput], language: Optional[LanguageInput],
+                  speed: Optional[Speed]) -> Op[TTSBlock]:
+    language_id = yield from resolve_language(state, language)
+    data = yield Call("POST", f"/services/{SERVICE}/add-block", json={
+        "project_id": project_id, "text": text, "voice_id": voice_id_of(voice),
+        "language_id": language_id, "speed": _speed(speed),
+    })
     return TTSBlock.from_dict(data if isinstance(data, Mapping) else {})
 
 
-def _update_block_op(project_id: int, block_id: str, text: str,
-                     speed: Speed) -> Op[Dict[str, Any]]:
+def _update_block_op(project_id: int, block_id: str, text: str, speed: Speed,
+                     voice: Optional[VoiceInput]) -> Op[Dict[str, Any]]:
     data = yield Call("PUT", f"/services/{SERVICE}/{int(project_id)}/{seg(block_id)}",
-                      json={"text": text, "speed": _speed(speed)})
+                      json={"text": text, "speed": _speed(speed), "voice_id": voice_id_of(voice)})
+    block = data.get("block") if isinstance(data, Mapping) else None
+    return dict(block) if isinstance(block, Mapping) else {}
+
+
+def _sort_blocks_op(project_id: int, block_ids: Sequence[str]) -> Op[Optional[Project]]:
+    ids = [str(b) for b in block_ids]
+    if not ids:
+        raise ValueError("block_ids must name at least one block")
+    data = yield Call("POST", f"/services/{SERVICE}/sort/{int(project_id)}",
+                      json={"sort_data": ids})
+    return project_from(data) if isinstance(data, Mapping) and data.get("project") else None
+
+
+def _duplicate_block_op(project_id: int, block_id: str) -> Op[Dict[str, Any]]:
+    data = yield Call("PUT",
+                      f"/services/{SERVICE}/duplicate-block/{int(project_id)}/{seg(block_id)}")
     block = data.get("block") if isinstance(data, Mapping) else None
     return dict(block) if isinstance(block, Mapping) else {}
 
@@ -257,17 +279,40 @@ class TTS(SyncResource):
         return self._run(_download_op(project_id, path))
 
     def add_block(self, text: Optional[str] = None, *,
-                  project_id: Optional[int] = None) -> TTSBlock:
+                  project_id: Optional[int] = None,
+                  voice: Optional[VoiceInput] = None,
+                  language: Optional[LanguageInput] = None,
+                  speed: Optional[Speed] = None) -> TTSBlock:
         """Add a text block to a project; omit ``project_id`` to start a new project.
 
-        Build a multi-block project with this, then queue it with :meth:`generate`.
+        Build a multi-block project with this, then queue it with :meth:`generate`. Every
+        block has its own voice, so one project can mix voices.
+
+        Args:
+            text: The block's text (a placeholder when omitted).
+            project_id: The project to add to; ``None`` creates a new one.
+            voice: A voice id or :class:`~voices_az.types.Voice` (default: the first
+                public voice of the language).
+            language: Language id or code such as ``"az"`` (default: Azerbaijani). When
+                given together with ``voice``, the voice must speak it.
+            speed: ``1``, ``1.5``, ``2``, ``2.5`` or ``3`` (default ``1``).
         """
-        return self._run(_add_block_op(text, project_id))
+        return self._run(_add_block_op(self._client._state, text, project_id, voice,
+                                       language, speed))
 
     def update_block(self, project_id: int, block_id: str, *, text: str,
-                     speed: Speed = 1) -> Dict[str, Any]:
-        """Replace a block's text and speed. Returns the updated block."""
-        return self._run(_update_block_op(project_id, block_id, text, speed))
+                     speed: Speed = 1, voice: Optional[VoiceInput] = None) -> Dict[str, Any]:
+        """Replace a block's text and speed, and its voice when ``voice`` is given (it
+        keeps its voice otherwise). Returns the updated block."""
+        return self._run(_update_block_op(project_id, block_id, text, speed, voice))
+
+    def sort_blocks(self, project_id: int, block_ids: Sequence[str]) -> Optional[Project]:
+        """Put the blocks in this order (block ids, first to last). Returns the project."""
+        return self._run(_sort_blocks_op(project_id, block_ids))
+
+    def duplicate_block(self, project_id: int, block_id: str) -> Dict[str, Any]:
+        """Insert a copy of a block right after it. Returns the new block."""
+        return self._run(_duplicate_block_op(project_id, block_id))
 
     def delete_block(self, project_id: int, block_id: str) -> None:
         """Delete one block of a project."""
@@ -364,14 +409,28 @@ class AsyncTTS(AsyncResource):
         return await self._run(_download_op(project_id, path))
 
     async def add_block(self, text: Optional[str] = None, *,
-                        project_id: Optional[int] = None) -> TTSBlock:
+                        project_id: Optional[int] = None,
+                        voice: Optional[VoiceInput] = None,
+                        language: Optional[LanguageInput] = None,
+                        speed: Optional[Speed] = None) -> TTSBlock:
         """See :meth:`TTS.add_block`."""
-        return await self._run(_add_block_op(text, project_id))
+        return await self._run(_add_block_op(self._client._state, text, project_id, voice,
+                                             language, speed))
 
     async def update_block(self, project_id: int, block_id: str, *, text: str,
-                           speed: Speed = 1) -> Dict[str, Any]:
+                           speed: Speed = 1,
+                           voice: Optional[VoiceInput] = None) -> Dict[str, Any]:
         """See :meth:`TTS.update_block`."""
-        return await self._run(_update_block_op(project_id, block_id, text, speed))
+        return await self._run(_update_block_op(project_id, block_id, text, speed, voice))
+
+    async def sort_blocks(self, project_id: int,
+                          block_ids: Sequence[str]) -> Optional[Project]:
+        """See :meth:`TTS.sort_blocks`."""
+        return await self._run(_sort_blocks_op(project_id, block_ids))
+
+    async def duplicate_block(self, project_id: int, block_id: str) -> Dict[str, Any]:
+        """See :meth:`TTS.duplicate_block`."""
+        return await self._run(_duplicate_block_op(project_id, block_id))
 
     async def delete_block(self, project_id: int, block_id: str) -> None:
         """See :meth:`TTS.delete_block`."""

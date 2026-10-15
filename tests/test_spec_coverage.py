@@ -33,6 +33,7 @@ OPERATIONS: Dict[Key, Callable[[Any], Any]] = {
     ("GET", "/languages"): lambda c: c.languages.list(refresh=True),
     ("GET", "/get-voices/{page}"): lambda c: c.voices.list(page=2, language=6, gender="female"),
     ("GET", "/services"): lambda c: c.services.list(),
+    ("GET", "/service/{service}"): lambda c: c.services.get("dubbing"),
     ("GET", "/customer/balance"): lambda c: c.account.balance(),
     ("GET", "/customer/transactions"): lambda c: c.account.transactions(page=2),
     # text-to-speech
@@ -46,9 +47,13 @@ OPERATIONS: Dict[Key, Callable[[Any], Any]] = {
     ("GET", "/services/text-to-speech/{projectId}"): lambda c: c.tts.get_project(P),
     ("DELETE", "/services/text-to-speech/{projectId}"): lambda c: c.tts.delete_project(P),
     ("POST", "/services/text-to-speech/add-block"):
-        lambda c: c.tts.add_block("Salam", project_id=P),
+        lambda c: c.tts.add_block("Salam", project_id=P, voice=41, language=6, speed=1.5),
     ("PUT", "/services/text-to-speech/{projectId}/{blockId}"):
-        lambda c: c.tts.update_block(P, B, text="Salam", speed=1.5),
+        lambda c: c.tts.update_block(P, B, text="Salam", speed=1.5, voice=41),
+    ("POST", "/services/text-to-speech/sort/{projectId}"):
+        lambda c: c.tts.sort_blocks(P, [B]),
+    ("PUT", "/services/text-to-speech/duplicate-block/{projectId}/{blockId}"):
+        lambda c: c.tts.duplicate_block(P, B),
     ("DELETE", "/services/text-to-speech/{projectId}/{blockId}"):
         lambda c: c.tts.delete_block(P, B),
     ("POST", "/services/text-to-speech/generate/{projectId}"): lambda c: c.tts.generate(P),

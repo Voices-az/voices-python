@@ -52,8 +52,7 @@ def _run_options(language_id: Optional[int], speakers: Optional[int],
     return {
         "language_id": language_id,
         "diarize": int(speakers) if speakers is not None else None,
-        # Wire name of "strip music and background noise first".
-        "demucs": remove_background,
+        "remove_background": remove_background,
         "convert_numbers": convert_numbers,
     }
 
