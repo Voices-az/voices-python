@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+API note, no SDK change needed: from the Voices.az server update planned for October 2026,
+paginated lists in the standard `links` / `meta` shape (`GET /customer/transactions`)
+carry a new integer field `page` in every `meta.links[]` entry (`null` for a previous /
+next link that leads nowhere). The SDK builds `Page` from `current_page`, `last_page`,
+`per_page` and `total` only, so its behaviour does not change; the new field is visible
+in `Page.raw`.
+
 ## 0.2.0 - 2026-10-15
 
 Follows the Voices.az API update of 2026-10-15. Deploy order: the API first - this version
