@@ -1,0 +1,43 @@
+name: release
+
+# Publishes to PyPI when a GitHub release is published (tag vX.Y.Z), through PyPI
+# Trusted Publishing (OIDC) — no API token is stored anywhere. One-time setup on
+# pypi.org → project voices-az → Publishing → add a GitHub publisher:
+#   owner Voices-az, repository voices-python, workflow release.yml, environment pypi.
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Version matches the tag
+        run: |
+          VERSION=$(python -c "import re;print(re.search(r'__version__\s*=\s*\"([^\"]+)\"', open('src/voices_az/_version.py').read()).group(1))")
+          test "v$VERSION" = "${GITHUB_REF_NAME}" || { echo "tag ${GITHUB_REF_NAME} != package v$VERSION"; exit 1; }
+      - run: pip install build twine
+      - run: python -m build
+      - run: twine check dist/*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
