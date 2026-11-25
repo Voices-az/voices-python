@@ -10,7 +10,9 @@ permissions:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Pinned: the ubuntu-latest image (26.04) no longer ships Python 3.9, which this
+    # package still supports (requires-python >= 3.9).
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
