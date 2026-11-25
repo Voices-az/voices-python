@@ -8,7 +8,7 @@ import httpx
 import pytest
 
 import voices_az
-from voices_az.types import JobStatus
+from voices_az.types import Emotion, EmotionStrength, JobStatus
 
 from .conftest import LANGUAGES, fail, ok
 
@@ -297,6 +297,94 @@ def test_sort_and_duplicate_blocks(client, api):
         return_value=ok({"block": {"id": "b9", "text": "Bir", "voice_id": 41}}))
     assert client.tts.duplicate_block(5822, "b1")["id"] == "b9"
     assert dup.call_count == 1
+
+
+SAD_BLOCK = {
+    "id": "b4", "project_id": 5822, "text": "Kədərli", "sort_order": 4, "speed": 1,
+    "emotion": "sad", "emotion_strength": 2,
+    "voice": {"id": 58, "full_name": "Murad", "emotions": ["sad", "happy"]},
+}
+
+
+def test_add_block_with_an_emotion(client, api):
+    add = api.post("/services/text-to-speech/add-block").mock(return_value=ok(SAD_BLOCK))
+    block = client.tts.add_block("Kədərli", project_id=5822, voice=58, emotion="sad",
+                                 emotion_strength=EmotionStrength.MEDIUM)
+    assert block.emotion == Emotion.SAD and block.emotion_strength == 2
+    assert block.voice["emotions"] == ["sad", "happy"]
+    assert json.loads(add.calls.last.request.content) == {
+        "project_id": 5822, "text": "Kədərli", "voice_id": 58, "emotion": "sad",
+        "emotion_strength": 2}
+
+    # Without the arguments nothing about emotions is sent.
+    client.tts.add_block("Adi", project_id=5822)
+    assert json.loads(add.calls.last.request.content) == {"project_id": 5822, "text": "Adi"}
+    with pytest.raises(TypeError):
+        client.tts.add_block("x", emotion="sad", emotion_strength=True)
+    with pytest.raises(TypeError):
+        client.tts.add_block("x", emotion="sad", emotion_strength="2")
+
+
+def test_blocks_without_emotion_keys_still_parse():
+    old = voices_az.types.TTSBlock.from_dict({"id": "b1", "project_id": 1, "text": "Bir"})
+    assert old.emotion is None and old.emotion_strength is None
+    plain = voices_az.types.TTSBlock.from_dict({"id": "b1", "project_id": 1, "text": "Bir",
+                                                "emotion": None, "emotion_strength": None})
+    assert plain.emotion is None and plain.emotion_strength is None
+
+
+def test_update_block_emotion_keep_set_clear_and_strength(client, api):
+    upd = api.put("/services/text-to-speech/5822/b4").mock(return_value=ok({"block": SAD_BLOCK}))
+
+    # Left out: the block keeps its emotion, nothing is sent.
+    client.tts.update_block(5822, "b4", text="Kədərli")
+    assert json.loads(upd.calls.last.request.content) == {"text": "Kədərli", "speed": 1}
+
+    client.tts.update_block(5822, "b4", text="Kədərli", emotion="happy", emotion_strength=3)
+    assert json.loads(upd.calls.last.request.content) == {
+        "text": "Kədərli", "speed": 1, "emotion": "happy", "emotion_strength": 3}
+
+    # The strength alone changes the strength of the emotion the block already has.
+    client.tts.update_block(5822, "b4", text="Kədərli", emotion_strength=1)
+    assert json.loads(upd.calls.last.request.content) == {
+        "text": "Kədərli", "speed": 1, "emotion_strength": 1}
+
+    # None (or an empty string) removes the emotion: sent as null.
+    for clear in (None, ""):
+        client.tts.update_block(5822, "b4", text="Kədərli", voice=41, emotion=clear)
+        assert json.loads(upd.calls.last.request.content) == {
+            "text": "Kədərli", "speed": 1, "voice_id": 41, "emotion": None}
+
+
+def test_synthesize_with_an_emotion(client, api):
+    start = api.post(SYNTH).mock(return_value=ok({"request_id": RID, "project": 1}))
+    client.tts.synthesize("Salam", voice=58, emotion="whisper", emotion_strength=1,
+                          wait=False)
+    assert json.loads(start.calls.last.request.content) == {
+        "text": "Salam", "voice_id": 58, "emotion": "whisper", "emotion_strength": 1}
+
+
+@pytest.mark.parametrize("field,message", [
+    ("emotion", "The selected emotion is not available for this voice."),
+    ("emotion_strength", "The emotion strength must be between 1 and 3."),
+])
+def test_emotion_refused_by_the_api(client, api, field, message):
+    response = httpx.Response(422, json={"status": "error", "message": message,
+                                         "errors": {field: [message]}})
+    api.post("/services/text-to-speech/add-block").mock(return_value=response)
+    api.put("/services/text-to-speech/5822/b4").mock(return_value=response)
+    api.post(SYNTH).mock(return_value=response)
+    calls = [
+        lambda: client.tts.add_block("x", voice=41, emotion="angry", emotion_strength=5),
+        lambda: client.tts.update_block(5822, "b4", text="x", emotion="angry"),
+        lambda: client.tts.synthesize("x", voice=41, emotion="angry", wait=False),
+    ]
+    for call in calls:
+        with pytest.raises(voices_az.ValidationError) as exc:
+            call()
+        assert type(exc.value) is voices_az.ValidationError
+        assert exc.value.status_code == 422
+        assert exc.value.errors == {field: [message]}
 
 
 def test_block_ids_are_escaped(client, api):

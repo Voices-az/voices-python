@@ -8,6 +8,7 @@ from typing import Any, Dict, Mapping, Optional, Sequence, Union
 from .._base import Call, Download
 from ..types import ExportedFile, JobStatus, Page, Project, Synthesis, TTSBlock
 from ._common import (
+    _UNSET,
     AsyncResource,
     DestInput,
     LanguageInput,
@@ -43,6 +44,14 @@ def _speed(value: Optional[Speed]) -> Optional[Union[int, float]]:
     return int(number) if number.is_integer() else number
 
 
+def _strength(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("emotion_strength must be 1, 2 or 3")
+    return int(value)
+
+
 def _get_response_op(request_id: str, project_id: Optional[int] = None) -> Op[Synthesis]:
     data = yield Call("GET", f"/services/{SERVICE}/get-response/{seg(request_id)}")
     return Synthesis.from_response(request_id, data if isinstance(data, Mapping) else {},
@@ -72,14 +81,16 @@ def _synthesize_op(state: Any, text: str, voice: Optional[VoiceInput],
                    language: Optional[LanguageInput], speed: Optional[Speed], wait: bool,
                    interval: float, timeout: Optional[float],
                    on_progress: Optional[ProgressCallback],
-                   idempotency_key: Optional[str]) -> Op[Synthesis]:
+                   idempotency_key: Optional[str], emotion: Optional[str] = None,
+                   emotion_strength: Optional[int] = None) -> Op[Synthesis]:
     if not isinstance(text, str) or not text.strip():
         raise ValueError("text must be a non-empty string")
+    strength = _strength(emotion_strength)
     language_id = yield from resolve_language(state, language)
     data = yield Call(
         "POST", f"/services/{SERVICE}/synthesize",
         json={"text": text, "language_id": language_id, "voice_id": voice_id_of(voice),
-              "speed": _speed(speed)},
+              "speed": _speed(speed), "emotion": emotion, "emotion_strength": strength},
         idempotency_key=new_idempotency_key(idempotency_key),
     )
     data = data if isinstance(data, Mapping) else {}
@@ -97,19 +108,33 @@ def _synthesize_op(state: Any, text: str, voice: Optional[VoiceInput],
 
 def _add_block_op(state: Any, text: Optional[str], project_id: Optional[int],
                   voice: Optional[VoiceInput], language: Optional[LanguageInput],
-                  speed: Optional[Speed]) -> Op[TTSBlock]:
+                  speed: Optional[Speed], emotion: Optional[str] = None,
+                  emotion_strength: Optional[int] = None) -> Op[TTSBlock]:
+    strength = _strength(emotion_strength)
     language_id = yield from resolve_language(state, language)
     data = yield Call("POST", f"/services/{SERVICE}/add-block", json={
         "project_id": project_id, "text": text, "voice_id": voice_id_of(voice),
-        "language_id": language_id, "speed": _speed(speed),
+        "language_id": language_id, "speed": _speed(speed), "emotion": emotion,
+        "emotion_strength": strength,
     })
     return TTSBlock.from_dict(data if isinstance(data, Mapping) else {})
 
 
 def _update_block_op(project_id: int, block_id: str, text: str, speed: Speed,
-                     voice: Optional[VoiceInput]) -> Op[Dict[str, Any]]:
+                     voice: Optional[VoiceInput], emotion: Any = _UNSET,
+                     emotion_strength: Optional[int] = None) -> Op[Dict[str, Any]]:
+    fields: Dict[str, Any] = {"text": text, "speed": _speed(speed)}
+    voice_id = voice_id_of(voice)
+    if voice_id is not None:
+        fields["voice_id"] = voice_id
+    if emotion is not _UNSET:
+        # None (or "") is sent as null: the API removes the block's emotion.
+        fields["emotion"] = emotion if emotion else None
+    strength = _strength(emotion_strength)
+    if strength is not None:
+        fields["emotion_strength"] = strength
     data = yield Call("PUT", f"/services/{SERVICE}/{int(project_id)}/{seg(block_id)}",
-                      json={"text": text, "speed": _speed(speed), "voice_id": voice_id_of(voice)})
+                      json=fields, keep_none=True)
     block = data.get("block") if isinstance(data, Mapping) else None
     return dict(block) if isinstance(block, Mapping) else {}
 
@@ -191,6 +216,8 @@ class TTS(SyncResource):
         wait_timeout: Optional[float] = DEFAULT_WAIT_TIMEOUT,
         on_progress: Optional[ProgressCallback] = None,
         idempotency_key: Optional[str] = None,
+        emotion: Optional[str] = None,
+        emotion_strength: Optional[int] = None,
     ) -> Synthesis:
         """Synthesize ``text`` and (by default) wait for the result.
 
@@ -215,16 +242,24 @@ class TTS(SyncResource):
             on_progress: Called with every polled :class:`~voices_az.types.Synthesis`.
             idempotency_key: Sent as ``Idempotency-Key`` so a retry cannot start a second
                 run. A fresh one is generated when omitted.
+            emotion: Read the text with this emotion (an
+                :class:`~voices_az.types.Emotion` code such as ``"sad"``). It must be one
+                of the voice's ``emotions``. Not sent when omitted.
+            emotion_strength: ``1`` weak (the default), ``2`` medium or ``3`` strong
+                (:class:`~voices_az.types.EmotionStrength`); used together with
+                ``emotion``. The price does not change.
 
         Raises:
             ContentPolicyError: The text was refused.
+            ValidationError: For example an ``emotion`` the voice does not have (see
+                ``errors["emotion"]``).
             JobFailedError: The run ended with ``FAILED``.
             TimeoutError: ``wait_timeout`` elapsed.
         """
         return self._run(_synthesize_op(
             self._client._state, text, voice, language, speed, wait,
             interval_of(poll_interval, self._poll_interval), wait_timeout, on_progress,
-            idempotency_key,
+            idempotency_key, emotion, emotion_strength,
         ))
 
     def get_response(self, request_id: str) -> Synthesis:
@@ -282,7 +317,9 @@ class TTS(SyncResource):
                   project_id: Optional[int] = None,
                   voice: Optional[VoiceInput] = None,
                   language: Optional[LanguageInput] = None,
-                  speed: Optional[Speed] = None) -> TTSBlock:
+                  speed: Optional[Speed] = None,
+                  emotion: Optional[str] = None,
+                  emotion_strength: Optional[int] = None) -> TTSBlock:
         """Add a text block to a project; omit ``project_id`` to start a new project.
 
         Build a multi-block project with this, then queue it with :meth:`generate`. Every
@@ -296,15 +333,30 @@ class TTS(SyncResource):
             language: Language id or code such as ``"az"`` (default: Azerbaijani). When
                 given together with ``voice``, the voice must speak it.
             speed: ``1``, ``1.5``, ``2``, ``2.5`` or ``3`` (default ``1``).
+            emotion: Read the block with this emotion, one of the voice's ``emotions``
+                (see :attr:`~voices_az.types.Voice.emotions`); default: none.
+            emotion_strength: ``1`` weak (default), ``2`` medium or ``3`` strong.
+
+        An emotion the voice does not have, or a strength outside 1-3, raises
+        :class:`~voices_az.ValidationError` (``errors["emotion"]`` /
+        ``errors["emotion_strength"]``).
         """
         return self._run(_add_block_op(self._client._state, text, project_id, voice,
-                                       language, speed))
+                                       language, speed, emotion, emotion_strength))
 
     def update_block(self, project_id: int, block_id: str, *, text: str,
-                     speed: Speed = 1, voice: Optional[VoiceInput] = None) -> Dict[str, Any]:
+                     speed: Speed = 1, voice: Optional[VoiceInput] = None,
+                     emotion: Any = _UNSET,
+                     emotion_strength: Optional[int] = None) -> Dict[str, Any]:
         """Replace a block's text and speed, and its voice when ``voice`` is given (it
-        keeps its voice otherwise). Returns the updated block."""
-        return self._run(_update_block_op(project_id, block_id, text, speed, voice))
+        keeps its voice otherwise). Returns the updated block.
+
+        ``emotion`` sets the block's emotion; ``emotion=None`` removes it (and its
+        strength); leaving it out keeps the current one. ``emotion_strength`` alone changes
+        the strength of the emotion the block already has.
+        """
+        return self._run(_update_block_op(project_id, block_id, text, speed, voice,
+                                          emotion, emotion_strength))
 
     def sort_blocks(self, project_id: int, block_ids: Sequence[str]) -> Optional[Project]:
         """Put the blocks in this order (block ids, first to last). Returns the project."""
@@ -374,12 +426,14 @@ class AsyncTTS(AsyncResource):
         wait_timeout: Optional[float] = DEFAULT_WAIT_TIMEOUT,
         on_progress: Optional[ProgressCallback] = None,
         idempotency_key: Optional[str] = None,
+        emotion: Optional[str] = None,
+        emotion_strength: Optional[int] = None,
     ) -> Synthesis:
         """See :meth:`TTS.synthesize`."""
         return await self._run(_synthesize_op(
             self._client._state, text, voice, language, speed, wait,
             interval_of(poll_interval, self._poll_interval), wait_timeout, on_progress,
-            idempotency_key,
+            idempotency_key, emotion, emotion_strength,
         ))
 
     async def get_response(self, request_id: str) -> Synthesis:
@@ -412,16 +466,21 @@ class AsyncTTS(AsyncResource):
                         project_id: Optional[int] = None,
                         voice: Optional[VoiceInput] = None,
                         language: Optional[LanguageInput] = None,
-                        speed: Optional[Speed] = None) -> TTSBlock:
+                        speed: Optional[Speed] = None,
+                        emotion: Optional[str] = None,
+                        emotion_strength: Optional[int] = None) -> TTSBlock:
         """See :meth:`TTS.add_block`."""
         return await self._run(_add_block_op(self._client._state, text, project_id, voice,
-                                             language, speed))
+                                             language, speed, emotion, emotion_strength))
 
     async def update_block(self, project_id: int, block_id: str, *, text: str,
                            speed: Speed = 1,
-                           voice: Optional[VoiceInput] = None) -> Dict[str, Any]:
+                           voice: Optional[VoiceInput] = None,
+                           emotion: Any = _UNSET,
+                           emotion_strength: Optional[int] = None) -> Dict[str, Any]:
         """See :meth:`TTS.update_block`."""
-        return await self._run(_update_block_op(project_id, block_id, text, speed, voice))
+        return await self._run(_update_block_op(project_id, block_id, text, speed, voice,
+                                                emotion, emotion_strength))
 
     async def sort_blocks(self, project_id: int,
                           block_ids: Sequence[str]) -> Optional[Project]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import io
+import json
 
 import httpx
 import pytest
@@ -181,6 +182,26 @@ async def test_async_voices_iter_and_request(aclient, api):
     assert page.total == 49 and not page.has_more
     api.get("/service/tts").mock(return_value=ok({"service": {"slug": "tts"}}))
     assert (await aclient.request("GET", "/service/tts"))["service"]["slug"] == "tts"
+
+
+async def test_async_block_emotions(aclient, api):
+    add = api.post("/services/text-to-speech/add-block").mock(return_value=ok({
+        "id": "b1", "project_id": 9, "emotion": "sad", "emotion_strength": 2}))
+    block = await aclient.tts.add_block("Salam", voice=58, emotion="sad", emotion_strength=2)
+    assert block.emotion == "sad" and block.emotion_strength == 2
+    assert json.loads(add.calls.last.request.content) == {
+        "text": "Salam", "voice_id": 58, "emotion": "sad", "emotion_strength": 2}
+    upd = api.put("/services/text-to-speech/9/b1").mock(return_value=ok({"block": {
+        "id": "b1", "emotion": None, "emotion_strength": None}}))
+    assert (await aclient.tts.update_block(9, "b1", text="Salam", emotion=None))[
+        "emotion"] is None
+    assert json.loads(upd.calls.last.request.content) == {"text": "Salam", "speed": 1,
+                                                          "emotion": None}
+    start = api.post("/services/text-to-speech/synthesize").mock(
+        return_value=ok({"request_id": "r", "project": 3}))
+    await aclient.tts.synthesize("Salam", emotion="happy", wait=False)
+    assert json.loads(start.calls.last.request.content) == {"text": "Salam",
+                                                            "emotion": "happy"}
 
 
 async def test_async_context_manager():

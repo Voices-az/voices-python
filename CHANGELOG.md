@@ -1,6 +1,22 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 - 2026-11-25
+
+Follows the Voices.az API update of 2026-11-25: emotions on text-to-speech blocks. The new
+fields are sent only when you pass them, so calls without them work against any API
+version.
+
+- `Voice.emotions`: the emotion codes a voice can read with (`sad`, `happy`, `angry`,
+  `whisper`); empty when the voice has none or the server does not report it.
+- `TTSBlock.emotion` and `TTSBlock.emotion_strength` (`None` when the block has no
+  emotion).
+- `tts.add_block()`, `tts.synthesize()` and `tts.update_block()` take `emotion` and
+  `emotion_strength` (1 weak, the default; 2 medium; 3 strong). In `update_block()` a left
+  out `emotion` keeps the block's emotion, `emotion=None` removes it, and
+  `emotion_strength` alone changes the strength of the current one.
+- New `types.Emotion` (code constants) and `types.EmotionStrength` (`IntEnum`).
+- An emotion the voice does not have, or a strength outside 1-3, is refused by the API
+  with `ValidationError` (`errors["emotion"]` / `errors["emotion_strength"]`).
 
 API note, no SDK change needed: from the Voices.az server update planned for October 2026,
 paginated lists in the standard `links` / `meta` shape (`GET /customer/transactions`)

@@ -15,6 +15,8 @@ from typing import Any, Dict, Generic, List, Mapping, Optional, TypeVar
 __all__ = [
     "JobStatus",
     "ProjectStatusCode",
+    "Emotion",
+    "EmotionStrength",
     "Gender",
     "Language",
     "Price",
@@ -60,6 +62,27 @@ class ProjectStatusCode(IntEnum):
     ORDERED = 4
     REJECTED = 5
     WAITING_FOR_ORDERING = 6
+
+
+class Emotion:
+    """Emotion codes a text-to-speech block can be read with.
+
+    A voice lists the ones it supports in :attr:`Voice.emotions`; the API may add codes
+    later, so treat this list as the known ones, not a closed set.
+    """
+
+    SAD = "sad"
+    HAPPY = "happy"
+    ANGRY = "angry"
+    WHISPER = "whisper"
+
+
+class EmotionStrength(IntEnum):
+    """``emotion_strength`` of a text-to-speech block."""
+
+    WEAK = 1
+    MEDIUM = 2
+    STRONG = 3
 
 
 def _dec(value: Any) -> Optional[Decimal]:
@@ -216,9 +239,17 @@ class Page(Generic[T]):
         return self.current_page < self.last_page
 
 
+def _emotions(value: Any) -> List[str]:
+    return [x for x in _list(value) if isinstance(x, str) and x]
+
+
 @dataclass
 class Voice:
-    """A voice from ``GET /get-voices`` or ``GET /services/dubbing/get-voices``."""
+    """A voice from ``GET /get-voices`` or ``GET /services/dubbing/get-voices``.
+
+    ``emotions`` lists the :class:`Emotion` codes a text-to-speech block read by this voice
+    may use; it is empty when the voice has none (and on servers that do not report it).
+    """
 
     id: int
     full_name: Optional[str]
@@ -232,6 +263,7 @@ class Voice:
     image: Optional[str] = None
     source: Optional[str] = None
     favorite: Optional[bool] = None
+    emotions: List[str] = field(default_factory=list)
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -250,6 +282,7 @@ class Voice:
             image=data.get("image"),
             source=data.get("source"),
             favorite=data.get("favorite"),
+            emotions=_emotions(data.get("emotions")),
             raw=dict(data),
         )
 
@@ -369,7 +402,12 @@ class Project:
 
 @dataclass
 class TTSBlock:
-    """A text block of a multi-block text-to-speech project (``add-block``)."""
+    """A text block of a multi-block text-to-speech project (``add-block``).
+
+    ``emotion`` is the block's :class:`Emotion` code and ``emotion_strength`` its
+    :class:`EmotionStrength` (``1``-``3``); both are ``None`` when the block is read
+    without an emotion. ``voice["emotions"]`` lists what the block's voice supports.
+    """
 
     id: str
     project_id: int
@@ -378,6 +416,8 @@ class TTSBlock:
     speed: Optional[float] = None
     language: Optional[Language] = None
     voice: Optional[Dict[str, Any]] = None
+    emotion: Optional[str] = None
+    emotion_strength: Optional[int] = None
     raw: Dict[str, Any] = field(default_factory=dict, repr=False)
 
     @classmethod
@@ -390,6 +430,8 @@ class TTSBlock:
             speed=_float(data.get("speed")),
             language=Language.maybe(data.get("language")),
             voice=dict(data["voice"]) if isinstance(data.get("voice"), Mapping) else None,
+            emotion=data.get("emotion") or None,
+            emotion_strength=_int(data.get("emotion_strength")),
             raw=dict(data),
         )
 

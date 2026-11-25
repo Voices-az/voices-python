@@ -4,6 +4,8 @@ from decimal import Decimal
 
 import pytest
 
+from voices_az.types import Emotion
+
 from .conftest import LANGUAGES, ok
 
 
@@ -33,6 +35,20 @@ def test_voices_list(client, api):
     assert found[0].raw["image"] == "https://x/i.png"
     params = route.calls.last.request.url.params
     assert params["language_id"] == "6" and params["gender"] == "2" and params["title"] == "Ay"
+
+
+def test_voice_emotions(client, api):
+    api.get("/get-voices/1").mock(return_value=ok({"voices": [
+        {**voice(41), "emotions": ["sad", "happy"]},
+        {**voice(58), "emotions": []},
+        voice(60),  # a server that does not report emotions
+        {**voice(61), "emotions": ["whisper", None, 3, ""]},
+    ]}))
+    found = client.voices.list()
+    assert found[0].emotions == ["sad", "happy"]
+    assert Emotion.SAD in found[0].emotions and Emotion.ANGRY not in found[0].emotions
+    assert found[1].emotions == [] and found[2].emotions == []
+    assert found[3].emotions == ["whisper"]
 
 
 @pytest.mark.parametrize("gender,expected", [("female", "1"), ("F", "1"), (2, "2"),

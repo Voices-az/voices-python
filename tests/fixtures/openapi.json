@@ -3,7 +3,7 @@
     "info": {
         "title": "Voices.az API",
         "version": "1.0.0",
-        "description": "Text-to-speech, speech-to-text and video dubbing over HTTP.\n\nEvery account gets an API key at registration. The key identifies the account, and\neverything it creates is billed to that account's balance — so a call that would cost\nmore than the remaining balance is refused before any work is queued.\n\n**Base URL** — `https://voices.az/api`\n\n### Authentication\n\nSend the key in the `X-API-KEY` header on every request:\n\n```\nX-API-KEY: vz_live_0123456789abcdef0123456789abcdef01234567\n```\n\nFor compatibility with the published PHP client the key is also accepted as a bare\n`Authorization` header (no `Bearer` prefix). New integrations should use `X-API-KEY`.\n\nThe key must never travel in a query string: it would end up in server logs, in proxy\nlogs and in the `Referer` of every asset a response links to. Requests carrying a key\nin the URL are refused with `401`.\n\nKeys are managed in the panel at **app.voices.az → Profile → API key**: the current\nkey is shown there, and it can be rotated or revoked. Rotation is immediate — the\nprevious key stops working the moment the new one is issued — and the new secret is\ndisplayed once.\n\n### What a key may call\n\nA key authenticates the *integration* surface and nothing else. Everything documented\nin this reference is inside that surface:\n\n* the service endpoints — `/services/text-to-speech/*`, `/services/speech-to-text/*`,\n  `/services/dubbing/*`, each operation listed below;\n* the catalogue — `/languages`, `/get-voices/{page}`, `/services`, `/service/{slug}`;\n* read-only account figures — `/customer/balance`, `/customer/transactions`.\n\nA few panel features answer a key as well (voice bookmarks, the website reader widget,\nvoice cloning, which is offered to corporate clients under contract). They are not part\nof this reference, their shapes follow the panel and may change without notice — build\nintegrations on the operations documented here.\n\nEverything else on `app.voices.az` is a panel-session operation and is refused to a\nkey with `403` and `error.type = api_key_scope`: the profile and its updates, the\navatar, panel state, logout, balance top-ups, promo codes, and the API key's own\nlifecycle (show / rotate / revoke). A key that leaks can therefore cost its owner\nbalance — it can never take over the account, read the owner's contact details, or\nreplace itself.\n\nSign in to the panel for any of those. There is no way to widen a key's scope.\n\n### Idempotency\n\nEvery call that queues work debits the balance, so a retry after a network timeout\nmust not become a second charge. Send an `Idempotency-Key` header on those calls:\n\n```\nIdempotency-Key: 8e6c3f0a-2a7d-4a5e-9f2b-7b1c0d4e5a66\n```\n\n* **Same key, same body** — the stored response is replayed unchanged, with the same\n  `request_id` and the header `Idempotent-Replayed: true`. Nothing is queued and\n  nothing is charged a second time.\n* **Same key, different body** — `422`, `error.type = idempotency_key_reused`. The key\n  already stands for a different operation; use a new one.\n* **Same key while the first call is still running** — `409`,\n  `error.type = idempotency_in_progress`. Wait a moment and retry with the same key to\n  get the replay.\n* **Server errors are not stored.** If a call fails with `5xx`, retrying it with the\n  same key runs the operation for real.\n\nRecords live for **24 hours**. The key may be any string of up to 64 characters from\n`A-Z a-z 0-9 . _ : -`; a uuid per operation is the intended use. Anything longer or\noutside that set is refused with `422`, `error.type = idempotency_key_invalid`.\n\nThe header is honoured on the calls that charge:\n\n| Endpoint |\n| --- |\n| `POST /services/text-to-speech/synthesize` |\n| `POST /services/text-to-speech/generate/{projectId}` |\n| `POST /services/speech-to-text/init` |\n| `POST /services/speech-to-text/recognize` |\n| `POST /services/speech-to-text/generate/{projectId}` |\n| `POST /services/dubbing/init` |\n| `POST /services/dubbing/preview/{projectId}` |\n| `POST /services/dubbing/generate/{projectId}` |\n| `POST /services/dubbing/render/{projectId}` |\n| `POST /services/dubbing/regenerate-chunk/{projectId}/{chunkId}` |\n\nEverywhere else the header is ignored, so a client may send it on every request\nwithout keeping track of which endpoints honour it. Without the header, behaviour is\nunchanged.\n\n### Pricing\n\nThe API bills at exactly the same per-minute tariff as the panel — there is no\nsurcharge for API use and no separate API plan. The current rate per service is\n`GET /services` and `GET /service/{slug}`; what a specific run will cost is returned\nby the call that starts it (`price`), and the charge is taken from the same balance\nthe panel spends. Duration is billed per minute of processed audio or video.\n\n### Retention\n\nFiles do not live in storage forever. The **project row** does: an expired project\nkeeps its id, its title and its place in `get-projects`, and\n`GET /services/{service}/{projectId}` still answers `200`. What it loses is its files.\n\n| What | Window |\n| --- | --- |\n| A paid project of any service, and everything it produced | **6 months** (180 days) after the last activity on it |\n| A dubbing project that was only previewed and never paid for | **30 days** |\n| Cloned voices | never swept |\n\n\"Last activity\" is the latest of the project's creation, its last change and its last\norder.\n\nOnce the sweep has taken a project's files it is marked, on every endpoint that returns\na project:\n\n* `is_expired: true`\n* `expired_at` — when the files went, ISO-8601\n\nand every url under `body` is `null`, so a client that ignores the flag gets nulls\nrather than links to objects that are gone.\n\nAny call that would ACT on those files answers `410` with `error.type = gone`:\n\n| Refused with `410` |\n| --- |\n| `POST /services/text-to-speech/generate/{projectId}` |\n| `POST /services/text-to-speech/export/{projectId}` |\n| `POST /services/speech-to-text/generate/{projectId}` |\n| `POST /services/speech-to-text/export/{projectId}` |\n| `POST /services/dubbing/generate/{projectId}` |\n| `POST /services/dubbing/preview/{projectId}` |\n| `POST /services/dubbing/regenerate-chunk/{projectId}/{chunkId}` |\n| `POST /services/dubbing/render/{projectId}` |\n| `POST /services/dubbing/export/{projectId}` |\n\nReading, listing, renaming, favouriting and deleting an expired project keep working,\nand creating a NEW project from the same text or a fresh upload is never affected.\nRetrying a `410` never helps — the files cannot be restored. Download what matters\nbefore the window closes.\n\n### Text tags\n\nText sent to text-to-speech may carry a few inline tags. They are written in square\nbrackets, inside the `text` field itself:\n\n| Tag | Effect |\n| --- | --- |\n| `[PAUSE=1.5]` | A silence of that many seconds at this point. |\n| `[LAUGH]` | A short laugh. |\n| `[SIGH]` | A sigh. |\n| `[UHM]` | An \"uhm\" hesitation, as in live speech. |\n| `[SHH]` | A quiet \"shh\". |\n\n`[PAUSE=n]` takes its length in seconds with a decimal point — `[PAUSE=0.5]`,\n`[PAUSE=1.5]`. Anything shorter than half a second is not treated as a pause.\n\nTag names are case-insensitive: `[laugh]` and `[LAUGH]` are the same tag. Anything\nelse between square brackets is not a tag — unknown tags are removed from the text\nbefore synthesis, so they are never read out.\n\nThe four sound tags are a hint rather than an instruction: they mark where the sound\nbelongs, and the AI may mispronounce them.\n\nTags are part of the text, so they count towards the character limit of the `text`\nfield. They do not change the price: text-to-speech is billed by the duration of the\naudio that comes back, and the silence of a `[PAUSE=n]` is part of that duration.\n\n### Language\n\n`Accept-Language: az | en | ru | tr` selects the language of human-readable messages\n(`message`, `error.message`, status titles). It does not affect ids or enum values.\n\n### Response envelope\n\nA success always has the same envelope:\n\n```json\n{ \"success\": true, \"message\": \"Operation was successful\", \"data\": { } }\n```\n\nA failure has one of two shapes, and a client has to read both.\n\n**Validation errors — `422`.** A request that did not pass validation, and a paid call\nthe balance does not cover, answer with field errors:\n\n```json\n{\n  \"status\": \"error\",\n  \"message\": \"The text field is required.\",\n  \"errors\": { \"text\": [\"The text field is required.\"] }\n}\n```\n\n`message` is the first error; `errors` maps every failing field to its messages. There\nis no `success` key in this shape — check the status code, or `status == \"error\"`.\n\nNot enough balance is a validation error on the `balance` field, and it carries the\nnumbers in a top-level `data` object, so a client can offer a top-up of exactly the\nmissing amount:\n\n```json\n{\n  \"status\": \"error\",\n  \"message\": \"There is not enough money in the balance\",\n  \"errors\": { \"balance\": [\"There is not enough money in the balance\"] },\n  \"data\": {\n    \"reason\": \"insufficient_balance\",\n    \"price\": \"2.10\",\n    \"balance\": \"0.40\",\n    \"missing\": \"1.70\",\n    \"currency\": \"AZN\",\n    \"project_id\": 7420\n  }\n}\n```\n\n**Every other failure** — `401`, `403`, `404`, `409`, `410`, `413`, `429`, `5xx`, and\nthe `422`s that are not about one field: `content_policy`, the `idempotency_key_*`\npair, and `validation_failed` for a request that cannot be served as a whole (a\nlanguage with no voice to read it, for example):\n\n```json\n{\n  \"success\": false,\n  \"error\": { \"message\": \"…\", \"code\": 404, \"type\": \"not_found\", \"data\": null }\n}\n```\n\n`error.code` is the HTTP status; `error.type` is a stable machine-readable slug —\nbranch on that rather than on the message, which is localised.\n\n`422` with `error.type = content_policy` means the text that would be voiced does not\ncomply with the service rules. It is answered before anything is charged or queued, by\n`synthesize` and `generate` of text-to-speech and by `render`, `regenerate-chunk` and\n`export` of dubbing (the translated lines of a dub are first checked there). Change the\ntext; retrying it unchanged gets the same answer.\n\n`413` with `error.type = payload_too_large` means an uploaded file is over the size\nlimit. `error.message` names the limit in megabytes; the exact figures are `limits` in\n`GET /service/{slug}`. Longer material can be sent as a YouTube link instead.\n\n### Booleans\n\nBoolean fields accept JSON `true` / `false`, and — in `multipart/form-data`, form or\nquery-string requests, where every value is a string — `\"true\"` / `\"false\"`, `\"1\"` /\n`\"0\"`, `\"on\"` / `\"off\"` and `\"yes\"` / `\"no\"`. Anything else is a validation error.\n\n### Rate limits\n\n60 requests per minute and 5000 per day, counted per API key. Over budget the API\nanswers `429` with `Retry-After` and `X-RateLimit-*` headers. Back off for\n`Retry-After` seconds; do not retry immediately.\n\n### Asynchronous work\n\nSynthesis, recognition and dubbing are queued. The call that starts one returns a\n`request_id`; poll the matching `get-response` endpoint (or, for speech-to-text, the\nproject itself) until `status` becomes `COMPLETED` or `FAILED`. Poll no more often\nthan once every 2 seconds.\n",
+        "description": "Text-to-speech, speech-to-text and video dubbing over HTTP.\n\nEvery account gets an API key at registration. The key identifies the account, and\neverything it creates is billed to that account's balance — so a call that would cost\nmore than the remaining balance is refused before any work is queued.\n\n**Base URL** — `https://voices.az/api`\n\n### Authentication\n\nSend the key in the `X-API-KEY` header on every request:\n\n```\nX-API-KEY: vz_live_0123456789abcdef0123456789abcdef01234567\n```\n\nFor compatibility with the published PHP client the key is also accepted as a bare\n`Authorization` header (no `Bearer` prefix). New integrations should use `X-API-KEY`.\n\nThe key must never travel in a query string: it would end up in server logs, in proxy\nlogs and in the `Referer` of every asset a response links to. Requests carrying a key\nin the URL are refused with `401`.\n\nKeys are managed in the panel at **app.voices.az → Profile → API key**: the current\nkey is shown there, and it can be rotated or revoked. Rotation is immediate — the\nprevious key stops working the moment the new one is issued — and the new secret is\ndisplayed once.\n\n### What a key may call\n\nA key authenticates the *integration* surface and nothing else. Everything documented\nin this reference is inside that surface:\n\n* the service endpoints — `/services/text-to-speech/*`, `/services/speech-to-text/*`,\n  `/services/dubbing/*`, each operation listed below;\n* the catalogue — `/languages`, `/get-voices/{page}`, `/services`, `/service/{slug}`;\n* read-only account figures — `/customer/balance`, `/customer/transactions`.\n\nA few panel features answer a key as well (voice bookmarks, the website reader widget,\nvoice cloning, which is offered to corporate clients under contract). They are not part\nof this reference, their shapes follow the panel and may change without notice — build\nintegrations on the operations documented here.\n\nEverything else on `app.voices.az` is a panel-session operation and is refused to a\nkey with `403` and `error.type = api_key_scope`: the profile and its updates, the\navatar, panel state, logout, balance top-ups, promo codes, and the API key's own\nlifecycle (show / rotate / revoke). A key that leaks can therefore cost its owner\nbalance — it can never take over the account, read the owner's contact details, or\nreplace itself.\n\nSign in to the panel for any of those. There is no way to widen a key's scope.\n\n### Idempotency\n\nEvery call that queues work debits the balance, so a retry after a network timeout\nmust not become a second charge. Send an `Idempotency-Key` header on those calls:\n\n```\nIdempotency-Key: 8e6c3f0a-2a7d-4a5e-9f2b-7b1c0d4e5a66\n```\n\n* **Same key, same body** — the stored response is replayed unchanged, with the same\n  `request_id` and the header `Idempotent-Replayed: true`. Nothing is queued and\n  nothing is charged a second time.\n* **Same key, different body** — `422`, `error.type = idempotency_key_reused`. The key\n  already stands for a different operation; use a new one.\n* **Same key while the first call is still running** — `409`,\n  `error.type = idempotency_in_progress`. Wait a moment and retry with the same key to\n  get the replay.\n* **Server errors are not stored.** If a call fails with `5xx`, retrying it with the\n  same key runs the operation for real.\n\nRecords live for **24 hours**. The key may be any string of up to 64 characters from\n`A-Z a-z 0-9 . _ : -`; a uuid per operation is the intended use. Anything longer or\noutside that set is refused with `422`, `error.type = idempotency_key_invalid`.\n\nThe header is honoured on the calls that charge:\n\n| Endpoint |\n| --- |\n| `POST /services/text-to-speech/synthesize` |\n| `POST /services/text-to-speech/generate/{projectId}` |\n| `POST /services/speech-to-text/init` |\n| `POST /services/speech-to-text/recognize` |\n| `POST /services/speech-to-text/generate/{projectId}` |\n| `POST /services/dubbing/init` |\n| `POST /services/dubbing/preview/{projectId}` |\n| `POST /services/dubbing/generate/{projectId}` |\n| `POST /services/dubbing/render/{projectId}` |\n| `POST /services/dubbing/regenerate-chunk/{projectId}/{chunkId}` |\n\nEverywhere else the header is ignored, so a client may send it on every request\nwithout keeping track of which endpoints honour it. Without the header, behaviour is\nunchanged.\n\n### Pricing\n\nThe API bills at exactly the same per-minute tariff as the panel — there is no\nsurcharge for API use and no separate API plan. The current rate per service is\n`GET /services` and `GET /service/{slug}`; what a specific run will cost is returned\nby the call that starts it (`price`), and the charge is taken from the same balance\nthe panel spends. Duration is billed per minute of processed audio or video.\n\n### Retention\n\nFiles do not live in storage forever. The **project row** does: an expired project\nkeeps its id, its title and its place in `get-projects`, and\n`GET /services/{service}/{projectId}` still answers `200`. What it loses is its files.\n\n| What | Window |\n| --- | --- |\n| A paid project of any service, and everything it produced | **6 months** (180 days) after the last activity on it |\n| A dubbing project that was only previewed and never paid for | **30 days** |\n| Cloned voices | never swept |\n\n\"Last activity\" is the latest of the project's creation, its last change and its last\norder.\n\nOnce the sweep has taken a project's files it is marked, on every endpoint that returns\na project:\n\n* `is_expired: true`\n* `expired_at` — when the files went, ISO-8601\n\nand every url under `body` is `null`, so a client that ignores the flag gets nulls\nrather than links to objects that are gone.\n\nAny call that would ACT on those files answers `410` with `error.type = gone`:\n\n| Refused with `410` |\n| --- |\n| `POST /services/text-to-speech/generate/{projectId}` |\n| `POST /services/text-to-speech/export/{projectId}` |\n| `POST /services/speech-to-text/generate/{projectId}` |\n| `POST /services/speech-to-text/export/{projectId}` |\n| `POST /services/dubbing/generate/{projectId}` |\n| `POST /services/dubbing/preview/{projectId}` |\n| `POST /services/dubbing/regenerate-chunk/{projectId}/{chunkId}` |\n| `POST /services/dubbing/render/{projectId}` |\n| `POST /services/dubbing/export/{projectId}` |\n\nReading, listing, renaming, favouriting and deleting an expired project keep working,\nand creating a NEW project from the same text or a fresh upload is never affected.\nRetrying a `410` never helps — the files cannot be restored. Download what matters\nbefore the window closes.\n\n### Text tags\n\nText sent to text-to-speech may carry a few inline tags. They are written in square\nbrackets, inside the `text` field itself:\n\n| Tag | Effect |\n| --- | --- |\n| `[PAUSE=1.5]` | A silence of that many seconds at this point. |\n| `[LAUGH]` | A short laugh. |\n| `[SIGH]` | A sigh. |\n| `[UHM]` | An \"uhm\" hesitation, as in live speech. |\n| `[SHH]` | A quiet \"shh\". |\n\n`[PAUSE=n]` takes its length in seconds with a decimal point — `[PAUSE=0.5]`,\n`[PAUSE=1.5]`. Anything shorter than half a second is not treated as a pause.\n\nTag names are case-insensitive: `[laugh]` and `[LAUGH]` are the same tag. Anything\nelse between square brackets is not a tag — unknown tags are removed from the text\nbefore synthesis, so they are never read out.\n\nThe four sound tags are a hint rather than an instruction: they mark where the sound\nbelongs, and the AI may mispronounce them.\n\nTags are part of the text, so they count towards the character limit of the `text`\nfield. They do not change the price: text-to-speech is billed by the duration of the\naudio that comes back, and the silence of a `[PAUSE=n]` is part of that duration.\n\n### Language\n\n`Accept-Language: az | en | ru | tr` selects the language of human-readable messages\n(`message`, `error.message`, status titles). It does not affect ids or enum values.\n\n### Response envelope\n\nA success always has the same envelope:\n\n```json\n{ \"success\": true, \"message\": \"Operation was successful\", \"data\": { } }\n```\n\nA failure has one of two shapes, and a client has to read both.\n\n**Validation errors — `422`.** A request that did not pass validation, and a paid call\nthe balance does not cover, answer with field errors:\n\n```json\n{\n  \"status\": \"error\",\n  \"message\": \"The text field is required.\",\n  \"errors\": { \"text\": [\"The text field is required.\"] }\n}\n```\n\n`message` is the first error; `errors` maps every failing field to its messages. There\nis no `success` key in this shape — check the status code, or `status == \"error\"`.\n\nNot enough balance is a validation error on the `balance` field, and it carries the\nnumbers in a top-level `data` object, so a client can offer a top-up of exactly the\nmissing amount:\n\n```json\n{\n  \"status\": \"error\",\n  \"message\": \"There is not enough money in the balance\",\n  \"errors\": { \"balance\": [\"There is not enough money in the balance\"] },\n  \"data\": {\n    \"reason\": \"insufficient_balance\",\n    \"price\": \"2.10\",\n    \"balance\": \"0.40\",\n    \"missing\": \"1.70\",\n    \"currency\": \"AZN\",\n    \"project_id\": 7420\n  }\n}\n```\n\nAn uploaded file with no sound at all — a video saved without an audio track — is a\nvalidation error on the file field (`file` for dubbing, `voice` for speech-to-text),\nwith `data.reason = media_no_audio`. Nothing is created, stored or charged:\n\n```json\n{\n  \"status\": \"error\",\n  \"message\": \"The file has no sound — upload a video with sound or an audio file\",\n  \"errors\": { \"file\": [\"The file has no sound — upload a video with sound or an audio file\"] },\n  \"data\": { \"reason\": \"media_no_audio\" }\n}\n```\n\nA file that cannot be read as audio or video at all gets the ordinary format error on\nthe same field, with no `data`.\n\n**Every other failure** — `401`, `403`, `404`, `409`, `410`, `413`, `429`, `5xx`, and\nthe `422`s that are not about one field: `content_policy`, the `idempotency_key_*`\npair, and `validation_failed` for a request that cannot be served as a whole (a\nlanguage with no voice to read it, for example):\n\n```json\n{\n  \"success\": false,\n  \"error\": { \"message\": \"…\", \"code\": 404, \"type\": \"not_found\", \"data\": null }\n}\n```\n\n`error.code` is the HTTP status; `error.type` is a stable machine-readable slug —\nbranch on that rather than on the message, which is localised.\n\n`422` with `error.type = content_policy` means the text that would be voiced does not\ncomply with the service rules. It is answered before anything is charged or queued, by\n`synthesize` and `generate` of text-to-speech and by `render`, `regenerate-chunk` and\n`export` of dubbing (the translated lines of a dub are first checked there). Change the\ntext; retrying it unchanged gets the same answer.\n\n`413` with `error.type = payload_too_large` means an uploaded file is over the size\nlimit. `error.message` names the limit in megabytes; the exact figures are `limits` in\n`GET /service/{slug}`. Longer material can be sent as a YouTube link instead.\n\n### Booleans\n\nBoolean fields accept JSON `true` / `false`, and — in `multipart/form-data`, form or\nquery-string requests, where every value is a string — `\"true\"` / `\"false\"`, `\"1\"` /\n`\"0\"`, `\"on\"` / `\"off\"` and `\"yes\"` / `\"no\"`. Anything else is a validation error.\n\n### Rate limits\n\n60 requests per minute and 5000 per day, counted per API key. Over budget the API\nanswers `429` with `Retry-After` and `X-RateLimit-*` headers. Back off for\n`Retry-After` seconds; do not retry immediately.\n\n### Asynchronous work\n\nSynthesis, recognition and dubbing are queued. The call that starts one returns a\n`request_id`; poll the matching `get-response` endpoint (or, for speech-to-text, the\nproject itself) until `status` becomes `COMPLETED` or `FAILED`. Poll no more often\nthan once every 2 seconds.\n\n### Changes\n\n* **November 2026 — text-to-speech audio after an edit.** Once the blocks of a\n  text-to-speech project change after its audio was made (text, voice, speed, a block\n  added, removed, duplicated or moved), the project `body` carries\n  `audio_outdated: true`: `preview_url` and the block `start` / `end` are those of the\n  previous text. `export` (and the card checkout for it) then answers `422` with\n  `error.type = tts_audio_outdated` before anything is charged — call `generate` again.\n  An already paid project still downloads its file, with `outdated: true` in the\n  answer. Nothing was removed or renamed.\n* **October 2026 — files without sound.** `POST /services/dubbing/init` and\n  `POST /services/speech-to-text/init` / `recognize` now refuse an upload that has no\n  audio stream (a video saved without sound) with a `422` on the file field and the\n  new `data.reason = media_no_audio` — such a file used to be accepted and fail later.\n  An upload that cannot be read at all now answers the format `422` instead of a `500`.\n  `GET /services/dubbing/get-response/{requestId}` has a new field `error_code` for a\n  `FAILED` run: `no_audio_stream`, `no_speech` or `processing_failed` (`null` while the\n  run is not `FAILED`); `message` of a `FAILED` run is now a localised sentence when the\n  reason is one of the first two and `null` otherwise. Nothing was removed or renamed.\n* **October 2026 — dubbing voices by id.** A dubbing project (`body.speakers[].voice`,\n  a line's `voice`, the `chunk` returned by the line endpoints, the `speakers` of a\n  preview's `get-response`) now names a voice as `{\"voice_id\": 41}` — the id from\n  `GET /services/dubbing/get-voices` — instead of the opaque `model` / `speaker_id`\n  pair, which is no longer returned. `vo.auto_style` is now the name of the voice whose\n  style was picked, with its id in the new `vo.auto_style_voice_id`. `estimate` carries\n  `speech_ms`, `chunk_count` and `translate_chars` only, and a speaker the documented\n  fields only; internal fields of a line's `vo` that are not part of its schema are no\n  longer returned.\n  `voice_map` and the line edit still accept the old pair (deprecated), so a stored value\n  keeps working.\n* **October 2026 — dubbing export, \"nothing to export\".** The `422` of\n  `POST /services/dubbing/export/{projectId}` for a project with nothing to export\n  now also carries `errors.dub_nothing_to_export` (same message as\n  `errors.video_url`, which stays). Branch on the new key. Nothing was removed.\n* **October 2026 — text-to-speech preview.** `preview_url` of a text-to-speech\n  project is now the first 60 seconds of the audio (the whole audio when it is\n  shorter), with the preview watermark; the full, clean file is what `export`\n  returns. A new number `preview_seconds` gives the preview's own length, next to\n  `duration` — which, like the price and the block `start` / `end`, still describes\n  the full audio. `preview_seconds` is `null` for a preview made before the change.\n  Nothing was removed or renamed.\n* **October 2026 — `meta.links[].page`.** Lists that come in the standard\n  `links` / `meta` pagination shape (`GET /customer/transactions`) carry a new\n  integer field `page` in every `meta.links[]` entry: the page number that link\n  opens, `null` for a previous / next link that leads nowhere. The change only\n  adds a field — nothing was removed or renamed, and clients that ignore unknown\n  fields need no update.\n",
         "contact": {
             "name": "Voices.az",
             "url": "https://voices.az"
@@ -157,6 +157,18 @@
                         "schema": {
                             "type": "string"
                         }
+                    },
+                    {
+                        "name": "tier",
+                        "in": "query",
+                        "description": "Only `standard` or only `premium` voices (see the `tier` field).",
+                        "schema": {
+                            "type": "string",
+                            "enum": [
+                                "standard",
+                                "premium"
+                            ]
+                        }
                     }
                 ],
                 "responses": {
@@ -177,6 +189,7 @@
                                                     "title": "Woman"
                                                 },
                                                 "age": 29,
+                                                "tier": "standard",
                                                 "is_public": true,
                                                 "is_rent": false,
                                                 "price": null,
@@ -376,7 +389,7 @@
                                             },
                                             "rules": {
                                                 "file_size": "The file size cannot exceed 100 MB",
-                                                "file_format": "The file must be in mp4, mov, mp3, wav format",
+                                                "file_format": "The file must be in mp4, mov, mp3, wav, m4a format",
                                                 "youtube": "Youtube video duration must be lower than 30 minutes"
                                             },
                                             "prices": {
@@ -535,6 +548,33 @@
                                             "current_page": 1,
                                             "from": 1,
                                             "last_page": 4,
+                                            "links": [
+                                                {
+                                                    "url": null,
+                                                    "label": "&laquo; Əvvəlki",
+                                                    "page": null,
+                                                    "active": false
+                                                },
+                                                {
+                                                    "url": "…",
+                                                    "label": "1",
+                                                    "page": 1,
+                                                    "active": true
+                                                },
+                                                {
+                                                    "url": "…",
+                                                    "label": "2",
+                                                    "page": 2,
+                                                    "active": false
+                                                },
+                                                {
+                                                    "url": "…",
+                                                    "label": "Növbəti &raquo;",
+                                                    "page": 2,
+                                                    "active": false
+                                                }
+                                            ],
+                                            "path": "…",
                                             "per_page": 20,
                                             "to": 20,
                                             "total": 71
@@ -620,7 +660,7 @@
                     "Text to speech"
                 ],
                 "summary": "Poll a synthesis run",
-                "description": "Poll until `status` is `COMPLETED` or `FAILED`. While it is `IN_PROGRESS` the\nresponse carries `percentage` (0–100).\n\nOn `COMPLETED`, `preview_url` is the whole project's audio and `duration` its length\nin seconds. `blocks` is an object keyed by block id (the `id` of each block of the\nproject), giving where that block sits in the audio: `start` / `end` / `duration`\nin seconds and `start_ts` / `end_ts` as `HH:MM:SS.mmm`. The per-block audio is\n`body.blocks[].preview_url` of `GET /services/text-to-speech/{projectId}`.\n\nA `request_id` that does not belong to the account is answered exactly like an\nunknown one — a neutral `IN_PROGRESS` at 0 %.\n",
+                "description": "Poll until `status` is `COMPLETED` or `FAILED`. While it is `IN_PROGRESS` the\nresponse carries `percentage` (0–100).\n\nOn `COMPLETED`, `preview_url` is the preview: the first 60 seconds of the project's\naudio (all of it when shorter), with the preview watermark, and `preview_seconds` its\nlength. `duration` is the length of the full audio in seconds — the one `export`\ndelivers and charges for. `blocks` is an object keyed by block id (the `id` of each block of the\nproject), giving where that block sits in the audio: `start` / `end` / `duration`\nin seconds and `start_ts` / `end_ts` as `HH:MM:SS.mmm`. The per-block audio is\n`body.blocks[].preview_url` of `GET /services/text-to-speech/{projectId}`.\n\nA `request_id` that does not belong to the account is answered exactly like an\nunknown one — a neutral `IN_PROGRESS` at 0 %.\n",
                 "parameters": [
                     {
                         "name": "requestId",
@@ -672,6 +712,7 @@
                                             "data": {
                                                 "status": "COMPLETED",
                                                 "preview_url": "https://storage.voices.az/storage/tmp/3a13a5c3.mp3",
+                                                "preview_seconds": 7.44,
                                                 "duration": 7.44,
                                                 "blocks": {
                                                     "0f2c1a5e-6b2a-4e6a-9b6e-2b4d8a1c9f77": {
@@ -711,7 +752,7 @@
                     "Text to speech"
                 ],
                 "summary": "Charge for and download the audio",
-                "description": "Charges the account for the project the first time it is called and returns the\naudio file URL. Calling it again on an already paid project does not charge twice.\n\nThe delivered file is MP3. A `format` field is accepted for backwards\ncompatibility and ignored.\n\n`free` is `true` only on the export that used the account's free first download\n(up to one minute of audio, once per account): nothing was charged for it. It is\n`false` on every other export, paid or repeated.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "description": "Charges the account for the project the first time it is called and returns the\naudio file URL. Calling it again on an already paid project does not charge twice.\n\nThe delivered file is MP3. A `format` field is accepted for backwards\ncompatibility and ignored.\n\n`free` is `true` only on the export that used the account's free first download\n(up to one minute of audio, once per account): nothing was charged for it. It is\n`false` on every other export, paid or repeated.\n\nA project whose text is nothing but the panel's example sentence is not exported:\n`422` with `error.type = tts_example_text`, before anything is charged. Replace it\nwith your own text. An already paid project downloads as before.\n\nA project whose blocks changed after its audio was made (`body.audio_outdated`) is\nnot exported either: `422` with `error.type = tts_audio_outdated`, before anything\nis charged. Call `generate` again. An already paid project still downloads the file\nit paid for; `outdated` is then `true` (the audio of the previous text).\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
                 "parameters": [
                     {
                         "$ref": "#/components/parameters/ProjectId"
@@ -744,7 +785,8 @@
                                     "data": {
                                         "title": "Bu test mətndir",
                                         "file": "https://storage.voices.az/storage/tmp/3a13a5c3.mp3",
-                                        "free": false
+                                        "free": false,
+                                        "outdated": false
                                     }
                                 }
                             }
@@ -916,12 +958,16 @@
                                             "body": {
                                                 "percentage": 100,
                                                 "preview_url": "https://storage.voices.az/storage/tmp/3a13a5c3.mp3",
+                                                "preview_seconds": 7.44,
+                                                "audio_outdated": false,
                                                 "blocks": [
                                                     {
                                                         "id": "0f2c1a5e-6b2a-4e6a-9b6e-2b4d8a1c9f77",
                                                         "text": "Salam, bu bir sınaq mətnidir.",
                                                         "sort_order": 1,
                                                         "speed": 1,
+                                                        "emotion": null,
+                                                        "emotion_strength": null,
                                                         "preview_url": "https://storage.voices.az/storage/tmp/0f2c1a5e.mp3",
                                                         "start": 0,
                                                         "end": 7.44,
@@ -929,7 +975,8 @@
                                                         "voice": {
                                                             "id": 41,
                                                             "full_name": "Aysel",
-                                                            "is_rent": false
+                                                            "is_rent": false,
+                                                            "emotions": []
                                                         }
                                                     }
                                                 ]
@@ -978,7 +1025,7 @@
                     "Text to speech"
                 ],
                 "summary": "Add a text block to a project",
-                "description": "Use this to build a multi-block project. Omit `project_id` to start a new one; the\nresponse carries the id to use for the following blocks. Nothing is queued or\ncharged — call `generate` when the blocks are ready.\n\nEvery block has its own voice, speed and language, so one project can mix voices.\nAll three are optional:\n\n* `voice_id` — any `id` from `GET /get-voices/{page}`. A voice that is not offered to\n  the account (inactive, or another account's own voice) is refused on the field.\n* `language_id` — from `GET /languages`, or `lang` with the language code (`\"az\"`).\n  When it is sent together with `voice_id`, the voice must speak that language.\n  Without a voice, the first public voice of the language is used.\n* `speed` — `1`, `1.5`, `2`, `2.5` or `3`.\n\nSent without any of them, the block reads in Azerbaijani with the first public\nAzerbaijani voice at speed 1. `text` defaults to a placeholder; set the real text\nhere or later with `PUT /services/text-to-speech/{projectId}/{blockId}`.\n\nA `project_id` that is not one of the account's projects answers `422`; one of the\naccount's projects of another service answers `404`.\n",
+                "description": "Use this to build a multi-block project. Omit `project_id` to start a new one; the\nresponse carries the id to use for the following blocks. Nothing is queued or\ncharged — call `generate` when the blocks are ready.\n\nEvery block has its own voice, speed and language, so one project can mix voices.\nAll three are optional:\n\n* `voice_id` — any `id` from `GET /get-voices/{page}`. A voice that is not offered to\n  the account (inactive, or another account's own voice) is refused on the field.\n* `language_id` — from `GET /languages`, or `lang` with the language code (`\"az\"`).\n  When it is sent together with `voice_id`, the voice must speak that language.\n  Without a voice, the first public voice of the language is used.\n* `speed` — `1`, `1.5`, `2`, `2.5` or `3`.\n\n`emotion` (with `emotion_strength`) is optional too: one of the voice's `emotions`.\n\nSent without any of them, the block reads in Azerbaijani with the first public\nAzerbaijani voice at speed 1. `text` defaults to a placeholder; set the real text\nhere or later with `PUT /services/text-to-speech/{projectId}/{blockId}`.\n\nA `project_id` that is not one of the account's projects answers `422`; one of the\naccount's projects of another service answers `404`.\n",
                 "requestBody": {
                     "required": false,
                     "content": {
@@ -1014,6 +1061,8 @@
                                         "text": "İkinci səs bu bloku oxuyur.",
                                         "sort_order": 2,
                                         "speed": 1.5,
+                                        "emotion": null,
+                                        "emotion_strength": null,
                                         "language": {
                                             "id": 6,
                                             "code": "az",
@@ -1021,7 +1070,8 @@
                                         },
                                         "voice": {
                                             "id": 58,
-                                            "full_name": "Murad"
+                                            "full_name": "Murad",
+                                            "emotions": []
                                         }
                                     }
                                 }
@@ -1085,13 +1135,31 @@
                                         "type": "integer",
                                         "nullable": true,
                                         "description": "From `GET /get-voices/{page}`. Omitted or `null` keeps the block's voice."
+                                    },
+                                    "emotion": {
+                                        "type": "string",
+                                        "nullable": true,
+                                        "example": "sad",
+                                        "description": "One of the voice's `emotions`. Omitted keeps the block's emotion; `null`\nor an empty value removes it. When the update moves the block to a voice\nwithout its emotion, the emotion is removed.\n"
+                                    },
+                                    "emotion_strength": {
+                                        "type": "integer",
+                                        "nullable": true,
+                                        "enum": [
+                                            1,
+                                            2,
+                                            3
+                                        ],
+                                        "description": "`1` weak (default), `2` medium, `3` strong. Omitted keeps the block's strength."
                                     }
                                 }
                             },
                             "example": {
                                 "text": "Salam, bu bir sınaq mətnidir.",
                                 "speed": 1,
-                                "voice_id": 58
+                                "voice_id": 58,
+                                "emotion": "sad",
+                                "emotion_strength": 2
                             }
                         }
                     }
@@ -1131,10 +1199,16 @@
                                             "sort_order": 1,
                                             "lang": "az",
                                             "speed": 1,
+                                            "emotion": "sad",
+                                            "emotion_strength": 2,
                                             "voice_id": 58,
                                             "voice": {
                                                 "id": 58,
-                                                "full_name": "Murad"
+                                                "full_name": "Murad",
+                                                "emotions": [
+                                                    "sad",
+                                                    "happy"
+                                                ]
                                             }
                                         }
                                     }
@@ -1361,6 +1435,8 @@
                                                         "block_num": null,
                                                         "sort_order": 0,
                                                         "speed": 1.5,
+                                                        "emotion": null,
+                                                        "emotion_strength": null,
                                                         "preview_url": null,
                                                         "start": null,
                                                         "end": null,
@@ -1368,7 +1444,8 @@
                                                         "voice": {
                                                             "id": 58,
                                                             "full_name": "Murad",
-                                                            "is_rent": false
+                                                            "is_rent": false,
+                                                            "emotions": []
                                                         }
                                                     },
                                                     {
@@ -1377,6 +1454,8 @@
                                                         "block_num": null,
                                                         "sort_order": 1,
                                                         "speed": 1,
+                                                        "emotion": null,
+                                                        "emotion_strength": null,
                                                         "preview_url": null,
                                                         "start": null,
                                                         "end": null,
@@ -1384,7 +1463,8 @@
                                                         "voice": {
                                                             "id": 41,
                                                             "full_name": "Aysel",
-                                                            "is_rent": false
+                                                            "is_rent": false,
+                                                            "emotions": []
                                                         }
                                                     }
                                                 ]
@@ -1457,10 +1537,13 @@
                                             "sort_order": 1,
                                             "lang": "az",
                                             "speed": 1,
+                                            "emotion": null,
+                                            "emotion_strength": null,
                                             "voice_id": 41,
                                             "voice": {
                                                 "id": 41,
-                                                "full_name": "Aysel"
+                                                "full_name": "Aysel",
+                                                "emotions": []
                                             }
                                         }
                                     }
@@ -1566,7 +1649,7 @@
                         "$ref": "#/components/responses/PayloadTooLarge"
                     },
                     "422": {
-                        "$ref": "#/components/responses/ValidationOrBalance"
+                        "$ref": "#/components/responses/UploadValidationOrBalance"
                     },
                     "429": {
                         "$ref": "#/components/responses/TooManyRequests"
@@ -1641,7 +1724,7 @@
                         "$ref": "#/components/responses/PayloadTooLarge"
                     },
                     "422": {
-                        "$ref": "#/components/responses/ValidationError"
+                        "$ref": "#/components/responses/UploadValidationError"
                     }
                 }
             }
@@ -2081,7 +2164,7 @@
                     "Dubbing"
                 ],
                 "summary": "Create a dubbing project from a file or a YouTube URL",
-                "description": "Creates a draft and starts preparing the source. Nothing is charged here.\n\nSend either `file` or `youtube_url`. The accepted formats are in\n`GET /services/dubbing/get-formats`, the size ceiling is `limits` in\n`GET /service/dubbing`; a bigger file answers `413`.\n\nAn audio file (`mp3`, `wav`) is dubbed like a video and exported as audio — see\n`export`. The two switches accept the spellings listed under **Booleans**.\n",
+                "description": "Creates a draft and starts preparing the source. Nothing is charged here.\n\nSend either `file` or `youtube_url`. The accepted formats are in\n`GET /services/dubbing/get-formats`, the size ceiling is `limits` in\n`GET /service/dubbing`; a bigger file answers `413`.\n\nAn audio file (`mp3`, `wav`, `m4a`) is dubbed like a video and exported as audio — see\n`export`. The two switches accept the spellings listed under **Booleans**.\n",
                 "requestBody": {
                     "required": true,
                     "content": {
@@ -2188,7 +2271,7 @@
                         "$ref": "#/components/responses/PayloadTooLarge"
                     },
                     "422": {
-                        "$ref": "#/components/responses/ValidationError"
+                        "$ref": "#/components/responses/UploadValidationError"
                     }
                 }
             }
@@ -2213,7 +2296,8 @@
                                             "mp4",
                                             "mov",
                                             "mp3",
-                                            "wav"
+                                            "wav",
+                                            "m4a"
                                         ],
                                         "background_modes": {
                                             "duck": "Duck",
@@ -2423,7 +2507,7 @@
                     "Dubbing"
                 ],
                 "summary": "Dub the whole video",
-                "description": "Charges the account for the full dub and queues it. Poll `get-response` until\n`status` is `COMPLETED`.\n\n`voice_map` assigns a voice to each detected speaker. Leave it out to let every\nspeaker keep a default voice of matching gender. Each value is an object:\n\n* `{\"voice_id\": 41}` — a voice from `GET /services/dubbing/get-voices`. This is the\n  form to use.\n* `{\"model\": …, \"speaker_id\": …}` — the `voice` object of a speaker exactly as\n  `body.speakers[].voice` of the project reports it. Both values are opaque\n  references, accepted so a speaker can be handed back a voice it already had;\n  never construct them.\n\n`voice_id` wins when both are sent. A value with neither is refused on\n`voice_map.<speaker>.model`, a `voice_id` that is not a dubbing voice on\n`voice.voice_id`. Speakers missing from the map keep their voice.\n\nThis is the call that pays for the dub: it sets the project's `is_paid` to `true`,\nand `POST /services/dubbing/export/{projectId}` is free from then on.\n\nThe amount is the per-minute dubbing tariff x the billable minutes, plus the\nautomatic-emotion surcharge when `body.auto_emotion` is on and has not been paid\nfor yet (`prices.auto_emotion_per_min` in the service payload x the same minutes).\nIt is a single order line and a single debit.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
+                "description": "Charges the account for the full dub and queues it. Poll `get-response` until\n`status` is `COMPLETED`.\n\n`voice_map` assigns a voice to each detected speaker. Leave it out to let every\nspeaker keep a default voice of matching gender. Each value is an object:\n\n* `{\"voice_id\": 41}` — a voice from `GET /services/dubbing/get-voices`. This is the\n  form to use.\n* `{\"model\": …, \"speaker_id\": …}` — deprecated. The project body used to report a\n  speaker's voice in this form; it now reports `{\"voice_id\": …}`, which is sent back\n  as it is. The old values are still accepted from integrations that stored them;\n  never construct them.\n\n`voice_id` wins when both are sent. A value with neither is refused on\n`voice_map.<speaker>.model`, a `voice_id` that is not a dubbing voice on\n`voice.voice_id`. Speakers missing from the map keep their voice.\n\nThis is the call that pays for the dub: it sets the project's `is_paid` to `true`,\nand `POST /services/dubbing/export/{projectId}` is free from then on.\n\nThe amount is the per-minute dubbing tariff x the billable minutes, plus the\nautomatic-emotion surcharge when `body.auto_emotion` is on and has not been paid\nfor yet (`prices.auto_emotion_per_min` in the service payload x the same minutes).\nIt is a single order line and a single debit.\n\nAnswers `410` once the project's retention window has passed — see **Retention**.\n",
                 "parameters": [
                     {
                         "$ref": "#/components/parameters/IdempotencyKey"
@@ -2466,7 +2550,8 @@
                                                 },
                                                 "model": {
                                                     "type": "string",
-                                                    "description": "Opaque — copied from `body.speakers[].voice.model`, never constructed."
+                                                    "deprecated": true,
+                                                    "description": "Deprecated — an opaque value the project body no longer reports. Use `voice_id`."
                                                 },
                                                 "speaker_id": {
                                                     "oneOf": [
@@ -2477,7 +2562,8 @@
                                                             "type": "integer"
                                                         }
                                                     ],
-                                                    "description": "Opaque — copied from `body.speakers[].voice.speaker_id`."
+                                                    "deprecated": true,
+                                                    "description": "Deprecated — an opaque value the project body no longer reports. Use `voice_id`."
                                                 }
                                             }
                                         }
@@ -2537,7 +2623,7 @@
                     "Dubbing"
                 ],
                 "summary": "Poll a dubbing run",
-                "description": "Takes the `request_id` of any dubbing run — a preview, a full dub, a render, a\nsingle re-recorded line, or the mp4 assembly behind a `202` from `export` — and\nreports its stage and percentage.\n\n`video_url` is `null` for every run since 2026-09-15: a render produces the\nsoundtrack, and the downloadable mp4 is built by `export`. An id that does not\nbelong to the account is answered exactly like an unknown one — a neutral\n`IN_PROGRESS` at 0 % with no other field.\n\nWhich fields carry a value depends on the run — see `DubbingRun`. `chunk_id` names\nthe line of a re-recording; `preview_audio_url`, `estimate` and `speakers` are\nfilled by a finished preview; `message` explains a `FAILED` run.\n",
+                "description": "Takes the `request_id` of any dubbing run — a preview, a full dub, a render, a\nsingle re-recorded line, or the mp4 assembly behind a `202` from `export` — and\nreports its stage and percentage.\n\n`video_url` is `null` for every run since 2026-09-15: a render produces the\nsoundtrack, and the downloadable mp4 is built by `export`. An id that does not\nbelong to the account is answered exactly like an unknown one — a neutral\n`IN_PROGRESS` at 0 % with no other field.\n\nWhich fields carry a value depends on the run — see `DubbingRun`. `chunk_id` names\nthe line of a re-recording; `preview_audio_url`, `estimate` and `speakers` are\nfilled by a finished preview; `error_code` says why a run `FAILED`, and `message`\nexplains it to the customer when the source itself is the reason.\n",
                 "parameters": [
                     {
                         "name": "requestId",
@@ -2581,6 +2667,29 @@
                                                 "percentage": 38,
                                                 "chunk_id": null,
                                                 "message": null,
+                                                "error_code": null,
+                                                "video_url": null,
+                                                "audio_url": null,
+                                                "preview_audio_url": null,
+                                                "estimate": null,
+                                                "speakers": null,
+                                                "duration_ms": null,
+                                                "source_lang": null
+                                            }
+                                        }
+                                    },
+                                    "failedNoAudio": {
+                                        "summary": "Failed — the source has no sound",
+                                        "value": {
+                                            "success": true,
+                                            "message": "Operation successful",
+                                            "data": {
+                                                "status": "FAILED",
+                                                "stage": "extract",
+                                                "percentage": 0,
+                                                "chunk_id": null,
+                                                "message": "The file has no sound — upload a video with sound or an audio file",
+                                                "error_code": "no_audio_stream",
                                                 "video_url": null,
                                                 "audio_url": null,
                                                 "preview_audio_url": null,
@@ -2602,6 +2711,7 @@
                                                 "percentage": 100,
                                                 "chunk_id": null,
                                                 "message": null,
+                                                "error_code": null,
                                                 "video_url": null,
                                                 "audio_url": "https://storage.voices.az/storage/dub/aZ8k2Q1pR7vT4wYx/dubbed.mp3",
                                                 "preview_audio_url": null,
@@ -2628,7 +2738,7 @@
                     "Dubbing"
                 ],
                 "summary": "Read one dubbing project",
-                "description": "`body.chunks` holds the per-line timeline: source text, translation, timing and the\nvoice-over for each line. `body.speakers` holds the detected speakers and the keys\n`voice_map` expects.\n\nThis is also where an export is watched: `body.export_status` and\n`body.export_request_id` report the mp4 assembly started by\n`POST /services/dubbing/export/{projectId}`.\n\n**Media urls.** `audio_url` — and `video_url` where a project still has one — carry\na `?v=…` cache-buster that changes with every render. Use the url exactly as it is\ngiven: the object behind it is overwritten in place, and a url with the stamp\nstripped can serve the previous render for hours.\n\n`video_url` is `null` for every project rendered since 2026-09-15: a render now\nproduces the soundtrack only, and the picture is the source the project was created\nfrom (`source_video_url` for a YouTube source, otherwise the uploaded file). Play\n`audio_url` over the source, and use `export` for a single muxed file. Older\nprojects keep whatever `video_url` they had.\n",
+                "description": "`body.chunks` holds the per-line timeline: source text, translation, timing and the\nvoice-over for each line. `body.speakers` holds the detected speakers and the keys\n`voice_map` expects.\n\nThis is also where an export is watched: `body.export_status` and\n`body.export_request_id` report the mp4 assembly started by\n`POST /services/dubbing/export/{projectId}`.\n\n**Media urls.** `audio_url` — and `video_url` where a project still has one — carry\na `?v=…` cache-buster that changes with every render. Use the url exactly as it is\ngiven: the object behind it is overwritten in place, and a url with the stamp\nstripped can serve the previous render for hours.\n\n`video_url` is `null` for every project rendered since 2026-09-15: a render now\nproduces the soundtrack only, and the picture is the source the project was created\nfrom: `source_video_url`, the storage URL of the uploaded file or of the\ndownloaded YouTube video (`null` until a YouTube source is fetched). Play\n`audio_url` over the source, and use `export` for a single muxed file. Older\nprojects keep whatever `video_url` they had.\n",
                 "parameters": [
                     {
                         "$ref": "#/components/parameters/ProjectId"
@@ -3128,7 +3238,6 @@
                                                 "muted": false,
                                                 "speed": 1,
                                                 "regen_count": 1,
-                                                "regen_speaker": "SPEAKER_00",
                                                 "status": "pending"
                                             }
                                         }
@@ -3291,7 +3400,7 @@
                         "$ref": "#/components/responses/Gone"
                     },
                     "422": {
-                        "description": "Nothing to export, the balance does not cover an export that still has to be\npaid for, or the lines do not comply with the service rules.\n\n\"Nothing to export\" (`errors.video_url`) is final rather than a \"not yet\": the\nproject has not been rendered, so there is neither a soundtrack to hand over nor\none to build a video from. Render it first; retrying the export alone will not\nchange the answer.\n",
+                        "description": "Nothing to export, the balance does not cover an export that still has to be\npaid for, or the lines do not comply with the service rules.\n\n\"Nothing to export\" is final rather than a \"not yet\": the project has not been\nrendered, so there is neither a soundtrack to hand over nor one to build a video\nfrom. Render it first; retrying the export alone will not change the answer. It\nis reported on two keys with the same message: `errors.video_url`, and\n`errors.dub_nothing_to_export` — the machine-readable one to branch on.\n",
                         "content": {
                             "application/json": {
                                 "schema": {
@@ -3312,6 +3421,9 @@
                                             "message": "There is no rendered video to export yet. Render the project first.",
                                             "errors": {
                                                 "video_url": [
+                                                    "There is no rendered video to export yet. Render the project first."
+                                                ],
+                                                "dub_nothing_to_export": [
                                                     "There is no rendered video to export yet. Render the project first."
                                                 ]
                                             }
@@ -3549,7 +3661,9 @@
                                     "idempotency_key_invalid",
                                     "idempotency_key_reused",
                                     "idempotency_in_progress",
-                                    "content_policy"
+                                    "content_policy",
+                                    "tts_example_text",
+                                    "tts_audio_outdated"
                                 ]
                             },
                             "data": {
@@ -3591,12 +3705,27 @@
                         }
                     },
                     "data": {
-                        "allOf": [
+                        "oneOf": [
                             {
                                 "$ref": "#/components/schemas/InsufficientBalance"
+                            },
+                            {
+                                "$ref": "#/components/schemas/MediaNoAudio"
                             }
                         ],
-                        "description": "Present only when the balance does not cover a paid call (`errors.balance`)."
+                        "description": "Present only when the balance does not cover a paid call (`errors.balance`,\n`reason = insufficient_balance`) or an uploaded file has no sound\n(`reason = media_no_audio`).\n"
+                    }
+                }
+            },
+            "MediaNoAudio": {
+                "type": "object",
+                "description": "Top-level `data` of a `422` on an uploaded file that has no audio stream.",
+                "properties": {
+                    "reason": {
+                        "type": "string",
+                        "enum": [
+                            "media_no_audio"
+                        ]
                     }
                 }
             },
@@ -3685,6 +3814,27 @@
                         "nullable": true,
                         "example": 29
                     },
+                    "tier": {
+                        "type": "string",
+                        "enum": [
+                            "standard",
+                            "premium"
+                        ],
+                        "example": "standard",
+                        "description": "The voice group. A `premium` voice is for text-to-speech only (it is not offered\nfor dubbing or the website reader) and its own per-minute `price` is added to the\ntext-to-speech rate. Generating with a premium voice needs a balance that covers\nat least one minute of it (`422` with `data.reason = insufficient_balance`\notherwise; nothing is charged until the download), and the free first download\ndoes not apply to a project that uses one. Premium voices are listed only for\naccounts they are offered to.\n"
+                    },
+                    "emotions": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "example": "sad"
+                        },
+                        "example": [
+                            "sad",
+                            "happy"
+                        ],
+                        "description": "The emotions a text-to-speech block read by this voice may have (`emotion` on\n`add-block`, `synthesize` and the block update). Empty when the voice has none or\nemotions are not offered to the account.\n"
+                    },
                     "is_public": {
                         "type": "boolean"
                     },
@@ -3697,7 +3847,8 @@
                                 "$ref": "#/components/schemas/Price"
                             }
                         ],
-                        "nullable": true
+                        "nullable": true,
+                        "description": "The voice's own per-minute price, added to the service rate."
                     },
                     "created_at": {
                         "type": "string",
@@ -3777,6 +3928,23 @@
                             3
                         ],
                         "default": 1
+                    },
+                    "emotion": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "sad",
+                        "description": "Optional. Read the block with this emotion. Only an emotion listed in the voice's\n`emotions` (`GET /get-voices/{page}`) is accepted; anything else is refused on the\nfield. Omitted or `null` = no emotion. Does not change the price.\n"
+                    },
+                    "emotion_strength": {
+                        "type": "integer",
+                        "nullable": true,
+                        "enum": [
+                            1,
+                            2,
+                            3
+                        ],
+                        "default": 1,
+                        "description": "`1` weak, `2` medium, `3` strong. Only used together with `emotion`."
                     }
                 }
             },
@@ -3804,6 +3972,22 @@
                         "type": "number",
                         "example": 1
                     },
+                    "emotion": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "sad",
+                        "description": "The block's emotion, `null` when it has none."
+                    },
+                    "emotion_strength": {
+                        "type": "integer",
+                        "nullable": true,
+                        "enum": [
+                            1,
+                            2,
+                            3
+                        ],
+                        "description": "`1` weak, `2` medium, `3` strong; `null` when the block has no emotion."
+                    },
                     "voice_id": {
                         "type": "integer",
                         "example": 41
@@ -3819,6 +4003,14 @@
                                 "type": "string",
                                 "nullable": true,
                                 "example": "Aysel"
+                            },
+                            "emotions": {
+                                "type": "array",
+                                "items": {
+                                    "type": "string",
+                                    "example": "sad"
+                                },
+                                "description": "The emotions this voice can read with, as in `GET /get-voices/{page}`."
                             }
                         }
                     }
@@ -3826,7 +4018,7 @@
             },
             "TTSRun": {
                 "type": "object",
-                "description": "`data` of `GET /services/text-to-speech/get-response/{requestId}`. `percentage` only\nwhile `IN_PROGRESS`; `preview_url`, `duration` and `blocks` only when `COMPLETED`.\n",
+                "description": "`data` of `GET /services/text-to-speech/get-response/{requestId}`. `percentage` only\nwhile `IN_PROGRESS`; `preview_url`, `preview_seconds`, `duration` and `blocks` only\nwhen `COMPLETED`.\n",
                 "required": [
                     "status"
                 ],
@@ -3847,11 +4039,17 @@
                     "preview_url": {
                         "type": "string",
                         "nullable": true,
-                        "description": "The whole project's audio."
+                        "description": "The preview — the first 60 seconds of the project's audio (all of it when\nshorter), with the preview watermark. The full file comes from `export`.\n"
+                    },
+                    "preview_seconds": {
+                        "type": "number",
+                        "nullable": true,
+                        "example": 60,
+                        "description": "Length of the preview, in seconds. `null` for a preview made before October 2026."
                     },
                     "duration": {
                         "type": "number",
-                        "description": "Length of that audio, in seconds."
+                        "description": "Length of the full audio, in seconds (what `export` delivers and charges for)."
                     },
                     "blocks": {
                         "type": "object",
@@ -3918,7 +4116,18 @@
                     "message": {
                         "type": "string",
                         "nullable": true,
-                        "description": "A short reason when the run failed. Informative; do not branch on it."
+                        "description": "A localised sentence for the customer when a `FAILED` run failed because of the\nsource itself (`error_code` `no_audio_stream` or `no_speech`), `null` otherwise.\nInformative; branch on `error_code`.\n"
+                    },
+                    "error_code": {
+                        "type": "string",
+                        "nullable": true,
+                        "enum": [
+                            "no_audio_stream",
+                            "no_speech",
+                            "processing_failed",
+                            null
+                        ],
+                        "description": "Why a `FAILED` run failed, `null` while it is not `FAILED`.\n`no_audio_stream` — the source has no sound at all; `no_speech` — no speech was\nfound in it; `processing_failed` — anything else (retry, or contact support).\n"
                     },
                     "video_url": {
                         "type": "string",
@@ -3938,7 +4147,21 @@
                     "estimate": {
                         "type": "object",
                         "nullable": true,
-                        "description": "Volume figures measured by a preview. Informative only — the price is the project's `price`."
+                        "description": "Volume figures measured by a preview. Informative only — the price is the project's `price`.",
+                        "properties": {
+                            "speech_ms": {
+                                "type": "integer",
+                                "description": "Speech in the source, in milliseconds."
+                            },
+                            "chunk_count": {
+                                "type": "integer",
+                                "description": "Lines found."
+                            },
+                            "translate_chars": {
+                                "type": "integer",
+                                "description": "Characters translated."
+                            }
+                        }
                     },
                     "speakers": {
                         "type": "array",
@@ -4012,7 +4235,14 @@
                     },
                     "voice": {
                         "type": "object",
-                        "description": "Present when the line has a voice of its own (set through `voice` on the line\nedit). Its values are opaque references.\n"
+                        "description": "Present when the line has a voice of its own (set through `voice` on the line\nedit).\n",
+                        "properties": {
+                            "voice_id": {
+                                "type": "integer",
+                                "nullable": true,
+                                "description": "The voice in `GET /services/dubbing/get-voices`; `null` when it is no longer listed there."
+                            }
+                        }
                     },
                     "vo": {
                         "type": "object",
@@ -4070,7 +4300,12 @@
                             },
                             "auto_style": {
                                 "type": "string",
-                                "description": "The style picked automatically for this take, when the automatic emotion chose it."
+                                "description": "The name of the voice whose style was picked automatically for this take,\nwhen the automatic emotion chose it.\n",
+                                "example": "Sevda - SAD"
+                            },
+                            "auto_style_voice_id": {
+                                "type": "integer",
+                                "description": "That voice's id in `GET /services/dubbing/get-voices`. Present with `auto_style`."
                             }
                         }
                     }
@@ -4278,7 +4513,21 @@
                     "estimate": {
                         "type": "object",
                         "nullable": true,
-                        "description": "Volume figures measured while preparing the source. Informative only — the\nprice is the per-minute dubbing tariff and is reported as the project's `price`.\n"
+                        "description": "Volume figures measured while preparing the source. Informative only — the\nprice is the per-minute dubbing tariff and is reported as the project's `price`.\n",
+                        "properties": {
+                            "speech_ms": {
+                                "type": "integer",
+                                "description": "Speech in the source, in milliseconds."
+                            },
+                            "chunk_count": {
+                                "type": "integer",
+                                "description": "Lines found."
+                            },
+                            "translate_chars": {
+                                "type": "integer",
+                                "description": "Characters translated."
+                            }
+                        }
                     },
                     "render_count": {
                         "type": "integer",
@@ -4326,9 +4575,22 @@
                                     "example": "m",
                                     "description": "`m` or `f`, as detected."
                                 },
+                                "gender_conf": {
+                                    "type": "number",
+                                    "nullable": true,
+                                    "description": "How sure the detection of `gender` is, 0-100."
+                                },
                                 "voice": {
                                     "type": "object",
-                                    "description": "The voice the speaker is dubbed with. Its values are opaque references;\nthey may be sent back unchanged in `voice_map`.\n"
+                                    "description": "The voice the speaker is dubbed with. It may be sent back unchanged in\n`voice_map`.\n",
+                                    "properties": {
+                                        "voice_id": {
+                                            "type": "integer",
+                                            "nullable": true,
+                                            "example": 41,
+                                            "description": "The voice in `GET /services/dubbing/get-voices`. `null` when the voice\nis no longer listed there — the speaker keeps it as long as it is left\nout of `voice_map`.\n"
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -4422,6 +4684,23 @@
                             3
                         ],
                         "default": 1
+                    },
+                    "emotion": {
+                        "type": "string",
+                        "nullable": true,
+                        "example": "sad",
+                        "description": "Optional. Read the block with this emotion. Only an emotion listed in the voice's\n`emotions` (`GET /get-voices/{page}`) is accepted; anything else is refused on the\nfield. Omitted or `null` = no emotion. Does not change the price.\n"
+                    },
+                    "emotion_strength": {
+                        "type": "integer",
+                        "nullable": true,
+                        "enum": [
+                            1,
+                            2,
+                            3
+                        ],
+                        "default": 1,
+                        "description": "`1` weak, `2` medium, `3` strong. Only used together with `emotion`."
                     }
                 }
             }
@@ -4628,6 +4907,104 @@
                                 "text": [
                                     "The text field is required."
                                 ]
+                            }
+                        }
+                    }
+                }
+            },
+            "UploadValidationError": {
+                "description": "The request did not pass validation (field errors). An uploaded file with no audio\nstream is the file field's error with `data.reason = media_no_audio` — see\n**Response envelope**.\n",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/ValidationFailure"
+                        },
+                        "examples": {
+                            "validation": {
+                                "summary": "A field did not pass validation",
+                                "value": {
+                                    "status": "error",
+                                    "message": "The background mode field is required.",
+                                    "errors": {
+                                        "background_mode": [
+                                            "The background mode field is required."
+                                        ]
+                                    }
+                                }
+                            },
+                            "noAudio": {
+                                "summary": "The uploaded file has no sound",
+                                "value": {
+                                    "status": "error",
+                                    "message": "The file has no sound — upload a video with sound or an audio file",
+                                    "errors": {
+                                        "file": [
+                                            "The file has no sound — upload a video with sound or an audio file"
+                                        ]
+                                    },
+                                    "data": {
+                                        "reason": "media_no_audio"
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            "UploadValidationOrBalance": {
+                "description": "The request did not pass validation, the uploaded file has no sound\n(`data.reason = media_no_audio`), or the balance does not cover the call\n(`errors.balance`, amounts in `data`) — see **Response envelope**.\n",
+                "content": {
+                    "application/json": {
+                        "schema": {
+                            "$ref": "#/components/schemas/ValidationFailure"
+                        },
+                        "examples": {
+                            "validation": {
+                                "summary": "A field did not pass validation",
+                                "value": {
+                                    "status": "error",
+                                    "message": "The language field is required.",
+                                    "errors": {
+                                        "language_id": [
+                                            "The language field is required."
+                                        ]
+                                    }
+                                }
+                            },
+                            "noAudio": {
+                                "summary": "The uploaded file has no sound",
+                                "value": {
+                                    "status": "error",
+                                    "message": "The file has no sound — upload a video with sound or an audio file",
+                                    "errors": {
+                                        "voice": [
+                                            "The file has no sound — upload a video with sound or an audio file"
+                                        ]
+                                    },
+                                    "data": {
+                                        "reason": "media_no_audio"
+                                    }
+                                }
+                            },
+                            "insufficientBalance": {
+                                "summary": "The balance does not cover the call",
+                                "value": {
+                                    "status": "error",
+                                    "message": "There is not enough money in the balance",
+                                    "errors": {
+                                        "balance": [
+                                            "There is not enough money in the balance"
+                                        ]
+                                    },
+                                    "data": {
+                                        "reason": "insufficient_balance",
+                                        "price": "0.92",
+                                        "balance": "0.40",
+                                        "missing": "0.52",
+                                        "currency": "AZN",
+                                        "project_id": 6103
+                                    }
+                                }
                             }
                         }
                     }

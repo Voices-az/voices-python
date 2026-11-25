@@ -73,8 +73,31 @@ client.tts.add_block("Xoş gəlmisiniz.", project_id=first.project_id, voice=58,
 client.tts.generate(first.project_id, wait=True)
 ```
 
-Also `update_block()` (text, speed, voice), `delete_block()`, `duplicate_block()` and
-`sort_blocks()`.
+Also `update_block()` (text, speed, voice, emotion), `delete_block()`, `duplicate_block()`
+and `sort_blocks()`.
+
+### Emotions
+
+Some voices can read a block with an emotion. `voice.emotions` lists the ones a voice has
+(`"sad"`, `"happy"`, `"angry"`, `"whisper"`); it is empty when the voice has none.
+
+```python
+voice = next(v for v in client.voices.iter(language="az") if "sad" in v.emotions)
+
+block = client.tts.add_block(
+    "Bu xəbəri eşidəndə çox kədərləndim.",
+    voice=voice,
+    emotion="sad",
+    emotion_strength=2,   # 1 weak (default), 2 medium, 3 strong
+)
+client.tts.generate(block.project_id, wait=True)
+
+# Later: change it, or remove it with emotion=None
+client.tts.update_block(block.project_id, block.id, text=block.text, emotion=None)
+```
+
+`synthesize()` takes the same `emotion` and `emotion_strength`. The price does not change.
+An emotion the voice does not have raises `ValidationError` (`errors["emotion"]`).
 
 ### Voices and languages
 

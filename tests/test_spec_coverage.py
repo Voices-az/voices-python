@@ -38,7 +38,7 @@ OPERATIONS: Dict[Key, Callable[[Any], Any]] = {
     ("GET", "/customer/transactions"): lambda c: c.account.transactions(page=2),
     # text-to-speech
     ("POST", "/services/text-to-speech/synthesize"):
-        lambda c: c.tts.synthesize("Salam", voice=41, language=6, wait=False),
+        lambda c: c.tts.synthesize("Salam", voice=41, language=6, wait=False, emotion="sad"),
     ("GET", "/services/text-to-speech/get-response/{requestId}"):
         lambda c: c.tts.get_response(R),
     ("POST", "/services/text-to-speech/export/{projectId}"): lambda c: c.tts.export(P),
@@ -47,9 +47,10 @@ OPERATIONS: Dict[Key, Callable[[Any], Any]] = {
     ("GET", "/services/text-to-speech/{projectId}"): lambda c: c.tts.get_project(P),
     ("DELETE", "/services/text-to-speech/{projectId}"): lambda c: c.tts.delete_project(P),
     ("POST", "/services/text-to-speech/add-block"):
-        lambda c: c.tts.add_block("Salam", project_id=P, voice=41, language=6, speed=1.5),
+        lambda c: c.tts.add_block("Salam", project_id=P, voice=41, language=6, speed=1.5,
+                                  emotion="sad", emotion_strength=2),
     ("PUT", "/services/text-to-speech/{projectId}/{blockId}"):
-        lambda c: c.tts.update_block(P, B, text="Salam", speed=1.5, voice=41),
+        lambda c: c.tts.update_block(P, B, text="Salam", speed=1.5, voice=41, emotion=None),
     ("POST", "/services/text-to-speech/sort/{projectId}"):
         lambda c: c.tts.sort_blocks(P, [B]),
     ("PUT", "/services/text-to-speech/duplicate-block/{projectId}/{blockId}"):
